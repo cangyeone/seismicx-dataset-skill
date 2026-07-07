@@ -6,21 +6,36 @@ SeismicX Dataset Skill helps an AI coding agent build standardized
 seismological AI datasets from waveform files, miniSEED archives, earthquake
 catalogs, phase-pick annotations, and continuous waveform directories.
 
-It is designed for OpenCode, Claude Code, Codex, and other agents that can read
+It is designed for OpenCode, Codex, Claude Code, and other agents that can read
 Markdown instructions and run local scripts.
 
-## Install In OpenCode
+## Install In OpenCode, Codex, Claude Code, Or Another Agent
 
-Open OpenCode and type:
+This repository is an agent skill. You can install it through any coding agent
+that can download a GitHub repository and register or copy a skill directory.
+
+In OpenCode, type:
 
 ```text
 Please download https://github.com/cangyeone/seismicx-dataset-skill and install it as a skill.
 ```
 
-You can also use this more explicit prompt:
+In Codex, type:
 
 ```text
-Please download cangyeone/seismicx-dataset-skill from GitHub, install it as a skill, and make it available for future seismic dataset-building tasks.
+Please download https://github.com/cangyeone/seismicx-dataset-skill and install it as a Codex skill.
+```
+
+In Claude Code, type:
+
+```text
+Please download https://github.com/cangyeone/seismicx-dataset-skill and make it available as a Claude Code skill or project instruction set.
+```
+
+In any other agent tool, type:
+
+```text
+Please download cangyeone/seismicx-dataset-skill from GitHub, install it as an agent-readable skill, and make it available for future seismic dataset-building tasks.
 ```
 
 After installation, the skill name is:
@@ -29,10 +44,15 @@ After installation, the skill name is:
 $seismicx-dataset
 ```
 
-## Use In OpenCode
+The repository also includes `AGENTS.md` for OpenCode-style agents,
+`CLAUDE.md` for Claude Code, and `SKILL.md` for Codex-style skill loading.
+
+## Use In OpenCode, Codex, Claude Code, Or Another Agent
 
 Put your waveform files, station metadata, catalogs, or annotation files in the
-current project directory. Then ask OpenCode in plain language:
+current project directory. Then ask your agent in plain language.
+
+General request:
 
 ```text
 Use $seismicx-dataset. Based on the data in the current directory, help me build a standardized seismic dataset.

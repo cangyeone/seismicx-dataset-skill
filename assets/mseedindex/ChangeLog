@@ -1,0 +1,233 @@
+2025.234: 3.0.8
+	- Limit float point values to single precision to avoid unrealistically
+	high precision values in the output.
+	- Update libmseed to v3.1.7 with fix for invalid time stamps in v2 record
+	blockettes.
+	- Update sqlite to v3.50.4.
+
+2025.160: 3.0.7
+	- Add GitHub workflow to build and publish to PyPI
+	- Update sqlite to v3.50.1.
+
+2025.114: 3.0.6
+	- Update libmseed to v3.1.5.
+
+2024.106: 3.0.5
+	- Change timestamps in JSON output to nanosecond epoch values to retain
+	nanosecond resolution.  Add formatted date-time strings for summary values.
+
+2024.032: 3.0.4
+	- Add WITHOUTURL build variable to disable building with URL support.
+	- Prefer /usr/bin/curl-config over any other curl-config.
+	- Replace setup.py with pyproject.toml for PyPI building hook.
+	- Update extra/fetchIndexInfo.py illustration example.
+	- Update libmseed to v3.1.1.
+
+2023.283:
+	- Update libmseed to v3.0.17.
+	- Update sqlite to v3.43.2.
+	- Fix PostgreSQL synchronization for libmseed API changes.
+	- Update documentation.
+
+2023.188:
+	- Fix the addition of strings in the JSON output.
+
+2023.180:
+	- Re-organize JSON output schema.
+	- Calculate SHA-256 for all read per-file data, include in JSON output.
+	- Add option -snd to skip non-miniSEED, otherwise exit if encountered.
+	- When input is stdin, set "mod time" to 0, do not include in JSON.
+	- Update to libmseed 3.0.15 and embedded yyjson library.
+	- Update to sqlite 3.40.1.
+
+2022.200:
+	- Add -json output option.
+	- Allow reading from stdin when input file is "-".
+	- Fix logic error wth inconsistent record lengths.
+
+2022.172:
+	- Complete porting to libmseed 3.
+	NOTE: Data quality indicators are no longer tracked and have
+	been replaced with version numbers for consistency.
+	No database schema change is needed as the schema already
+	includes fields for both quality and version.
+
+2022.160:
+	- Update libmseed to v3.0.11.
+	- Invert the logic of WITHOUTPOSTGRESQL -> WITHPOSTGRESQL,
+	Default build is without PostgreSQL support and it must be
+	enabled if desired.
+
+2019.122:
+	- Add setup.py to allow pushing a installer package to PyPi.
+
+2018.163: 2.7.1
+	- Add Windows compatibility bits and Makefile.win (Nmake) files.
+
+2018.059: 2.7
+	- Update SQLite to 3.22.0.
+	- Update time series index database schema to version 1.1.
+	This schema change includes the addition of a 'version' field,
+	which is unpopulated by this version of the software but will
+	be populated in the future.
+
+2017.283: 2.6
+	- Update libmseed to 2.19.5, with fix for leap second calculation.
+
+2017.201: 2.5
+	- Update logic that identifies and replaces index rows for the same
+	or versioned file names to match the data time coverage +- 1 day.
+	Otherwise, replacement of files containing no overlap data did not
+	work correctly.
+
+2017.123: 2.4
+	- Update libmseed to 2.19.4.
+	- Update SQLite to 3.18.0.
+	- Add 'PRAGMA case_sensitive_like = ON' for SQLite synchronization.
+	This means that the LIKE queries are performed case sensitive as
+	they should be for the program usage with the filename column.
+	Importantly, this allows the LIKE matching to use the column index.
+
+2017.071: 2.3
+	- Add -noup (no updates) option to refrain from searching for and
+	deleting existing rows in the database.
+	- Remove double quotes from keys and values of timeindex field
+	in SQLite representation.
+
+2017.069: 2.2
+	- Combine SQLite indexes for more efficient use.
+
+2017.068:
+	- Add -sqlitebusyto option to allow changes to the SQLite busy
+	timeout value.
+	- Make -table argument optional and use default of 'tsindex'.
+
+2017.066: 2.1
+	- Set SQLite busy timeout to 10 seconds to allow for graceful
+	multi-process access to the database (e.g. parallel usage).
+	- Set HAVE_USLEEP=1 for SQLite build to allow timeout loops to
+	iterate with sub-second intervals.
+
+2017.062: 2.0
+	- Update libmseed to 2.19.2.
+	- Update sqlite to 3.17.
+	- Update to table definition with timerates and format fields, hereby
+	known as schema version 1.0.
+	- Update doc/database-schema.txt to version 1.0 and generalize.
+	- Change default database name from iris to timeseries.
+
+2016.314: 1.9
+	- Update libmseed to 2.18.
+	- Update sqlite to 3.15.
+	- Change license to LGPLv3 and add LICENSE.txt.
+	- Add doc/mseedindex.md, a translation of the man page to markdown.
+
+2016.255: 1.8
+	- Require -table argument and one of either -pghost or -sqlite.
+	- Add capabilty to synchronize with SQLite3 databases.
+	- Refactor internals for reduced mixing of database interactions.
+	- Allow building without PostgreSQL support by setting WITHOUTPOSTGRESQL.
+
+2016.169: 1.7
+	- Add extent time range for the queries that search for and delete rows
+	based on filename.  The time range criteria can be used by the database
+	for more efficient searching.
+
+2015.122: 1.6
+	- Update libmseed to 2.16.
+	- Database schema change: replace timerange field with starttime,endtime
+	- Resolve absolute paths for input files and store them by default.  A new
+	command line option of '-kp' can be used to keep the original paths.
+
+2015.088: 1.5
+	- Increase maximum size of buffer allowed for the string representation
+	of the time spans (4 MiB to 8 MiB). Sufficient for 200,000+ spans.
+
+2015.086: 1.4
+	- Increase maximum size of buffers allowed for the string representation
+	of the time index (1 KB to 4 KB) and time spans (1 MiB to 4 MiB).
+
+2105.082: 1.3
+	- Fix logic of tracking next time index boundary to guarantee that the
+	index time and offset are only increasing.
+
+2015.078: 1.2
+	- Separate file reading and database synchronization into different loops.
+	- Only connect to the database after all input files have been read.
+	This avoids holding a database connection open while data files are read
+	and reduces the connection time needed.
+
+2015.071: 1.1
+	- Update libmseed to 2.15.
+	- Reset previous file position for each file.
+	- Track whether records in a data section are in time order and set
+	a 'latest' flag in the time index based on ordering.  If the records
+	are in time order then the index also indicates the byte offest of the
+	latest timed data.
+
+2015.062: 1.0
+	- Update libmseed to 2.14.
+	- Read leap second list file from /opt/dmc/share/leap-seconds.list
+
+2015.060: 0.91
+	- Set data section update time to file modification time instead of
+	the scan time when not retaining an existing entry.
+
+2015.059: 0.9
+	- Rework logic to track all conterminous records with the same NSLCQ
+	as a section regardless of time order, each section will be exactly
+	one row in the database.
+	- Add time span tracking for each contiguous NSLCQ section in file,
+	store as array of numrange values (epoch times) in 'timespans' field.
+	Data with a sample rate of zero is not included in the time span list.
+	- Remove tracking of segment count and gap seconds as these do not
+	work properly when data is not in time order.
+	- Set time index to NULL when the earliest data in a given section is
+	not represented in the index.  It would not be usable to indentify
+	a contiguous read range including all data.
+
+2015.057:
+	- Rename to mseedindex from mseedsyncdb.
+
+2015.037: 0.8
+	- Fix printing error, print int32_t segments as %d insted of %lld.
+
+2015.037: 0.7
+	- Store file modification time in new filemodtime field.
+	- Improve failure handling on memory allocation errors.
+
+2015.035: 0.6
+	- Track time indexing within a segment at one hour intervals and
+	store indexing in a new hstore field.
+
+2014.288: 0.5
+	- Update to new schema using separate network, station, location,
+	channel, quality as character fields instead of nslcq ltree.
+
+2014.281: 0.4
+	- Group conterminuous NSLCQ records in a file and track number of
+	continuous segments and total gap (non-coverage) for each group.
+	- Update to new schema supporting the segment count and gap value.
+
+2014.279: 0.3
+	- Update to new schema using fields:
+	  * nslcq (ltree type for Net.Sta.Loc.Chan.Qual)
+	  * timerange (tstzrange type for inclusive start-end range)
+	- Add the following options:
+	  * -table: specify target table name, default is 'timeseries'
+	  * -dbhost: specify database host, default dbserv3
+	  * -dbport: specify database port, default 5444
+	  * -dbuser: specify database user name, default timeseries
+	  * -dbpass: specify database user password, default timeseries
+
+2014.260:
+	- Update libmseed to 2.13.
+	- Rearrange src/Makefile to tidy it up and avoid LDFLAGS collision.
+
+2013.308: 0.2
+	- Update libmseed to 2.12.
+	- Add -TRACE option to turn on libpq connection tracing.
+	- Add segment (trace) listing to verbose output.
+
+2013.014: 0.1
+	- Initial version.

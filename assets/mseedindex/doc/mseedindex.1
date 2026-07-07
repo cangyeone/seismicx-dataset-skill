@@ -1,0 +1,213 @@
+.TH MSEEDINDEX 1 2023/10/10 "EarthScope Data Services" "EarthScope Data Services"
+.SH NAME
+Synchronize miniSEED summary and index with database
+
+.SH SYNOPSIS
+.nf
+mseedindex [options] file1 [file2 file3 ...]
+
+.fi
+.SH DESCRIPTION
+\fBmseedindex\fP reads miniSEED, determines contiguous data sections
+of time series (same network, station, location, channel and version)
+and optionally synchronizes information about each data section with a
+database and/or generates a JSON-formatted file of the index
+information.
+
+The location of a given section is represented in the database as
+starting at a byte offset in a file and a count of bytes that follow.
+Each section of data is a row in the schema.
+
+Data files should be scanned or synchronized when they are in-place.
+By default the absolute path to each input file will be resolved and
+stored.
+
+If '-' is specified as an input file, records will be read from
+standard input.  Some other software is then responsible for tracking
+the location (path) of the data.  This can be used with the
+\fB-json\fP output option, where the index information is externally
+processed and the real path can be ignored or inserted.
+
+Any existing rows in the database that match the file being
+synchronized will be replaced during synchronization, assuming
+the original and replacement files contain data that is within
+1 day of overlapping.  This operation is done as a database
+transaction containing all deletions and all insertions.  See
+\fBFILE VERSIONING\fP for a description of how to avoid race
+conditions while simultaneously updating data files and extracting
+data.
+
+PostgreSQL (version >= 9.1) and SQLite3 are supported as target
+databases.  When using Postgres the specified table is expected to
+exist.  When using SQLite both the database file and table will be
+created as needed, along with some indexes on common fields.
+
+.SH FILE VERSIONING
+During synchronization, all existing rows associated with the file
+being scanned will be deleted and new rows representing the current
+file will be inserted, effectively replacing all rows for a given file.
+
+This situation leads to a timing issue if data file
+replacement/synchronization and data extraction are occurring at the
+same time.  To avoid this race condition \fBmseedindex\fP supports
+the following:
+
+1) all deletions of existing rows and insertions of rows for a given
+file are performed in a transaction, meaning that the operation is
+atomic and no database reader can see a mix of rows from both files.
+
+2) \fBmseedindex\fP recognizes file versions as numbers appended to a
+file name following a \fB#\fP character, with this pattern:
+
+.nf
+/path/to/data.file#VERSION
+.fi
+
+If a file name contains this version information \fBmseedindex\fP
+will search for existing rows in the database that match everything
+but the version, e.g. \fBfilename like /path/to/data.file%\fP in SQL.
+The original and replacement file must contain data that is within
+1 day of overlapping.
+
+These features combined mean that a data file can be "replaced" by
+creating a new version of the file and scanning it without
+interrupting concurrent data extraction.  After replacement, another
+process can later remove the older version of the file.
+
+One consequence is that no file names should contain a \fB#\fP
+character other than to designate a file version.
+
+.SH DATA SECTION UPDATE TIME
+The schema contains fields for storing a hash (MD5) and update time of
+the data records containing a given data section.  When updating
+existing rows the \fBupdated\fP field will only be changed when the
+hash does not match the existing row.  This facilitates tracking of
+time series updates even when data files are replaced but contain
+the same segments.
+
+The time that the row was last updated is tracked independently in the
+\fBscanned\fP field.
+
+.SH OPTIONS
+
+.IP "-V         "
+Print program version and exit.
+
+.IP "-h         "
+Print program usage and exit.
+
+.IP "-v         "
+Be more verbose.  This flag can be used multiple times ("-v -v" or
+"-vv") for more verbosity.
+
+.IP "-snd       "
+Skip non-miniSEED data.  Useful if indexing files that contain miniSEED
+but also otherdata, e.g. full SEED volumes.  Otherwise, the program
+will exit when un-recognized data are encountered.  If this option is
+used and data are skipped the calculated SHA-256 will not represent
+all data in the file.
+
+.IP "-ns        "
+No synchronization.  Read miniSEED, determine data representation but
+do not synchronize the time series information with the database.
+Typically this would be used during diagnostics or testing and in
+combination the verbose option to print the time series information.
+
+.IP "-noup      "
+No updates.  Do not search for and delete existing database entries.
+This is more efficient when indexing data for the first time and it is
+known that no entries exist for the specified file(s).  Misuse of this
+option can result in duplicate or inappropriate index entries.
+
+.IP "-kp       "
+Keep the original file paths as specified.  By default the absolute,
+canonical path to each file is determined and stored in the database.
+
+.IP "-tt \fIsecs\fP"
+Specify a time tolerance for constructing continuous trace
+segments. The tolerance is specified in seconds.  The default
+tolerance is 1/2 of the sample period.
+
+.IP "-rt \fIdiff\fP"
+Specify a sample rate tolerance for constructing continuous trace
+segments. The tolerance is specified as the difference between two
+sampling rates.  The default tolerance is tested as: (abs(1-sr1/sr2) <
+0.0001).
+
+.IP "-si \fIsecs\fP"
+Specify the sub-indexing interval in seconds, default is 3600 (1 hour).
+This parameter controls how often a time index is created with an
+otherwise contiguous data section.
+
+.IP "-pghost \fIhostname\fP"
+Specify the Postgres database host name.
+
+.IP "-sqlite \fIfile\fP"
+Specify the SQLite3 database file name,
+e.g. 'timeseries.sqlite'.
+
+.IP "-json \fIfile\fP"
+Specify file to write JSON-formatted index information.
+
+.IP "-table \fItablename\fP"
+Specify the database table name, default value is 'tsindex'.
+
+.IP "-dbport \fIport\fP"
+Specify the database host name, default: 5432.
+
+.IP "-dbname \fIname\fP"
+Specify database name or full connection info, default: timeseries
+
+.IP "-dbuser \fIusername\fP"
+Specify the database user name, default: timeseries.
+
+.IP "-dbpass \fIpassword\fP"
+Specify the database user password.  Database specific authentication
+mechanisms may be used, such as the Postgres password file.
+
+.IP "-TRACE"
+Enable Postgres libpq tracing facility and direct output to stderr.
+
+.IP "-sqlitebusyto \fImilliseconds\fP"
+Set the SQLite busy timeout value in milliseconds, default is 10
+seconds.  This is the amount of time to wait for a database lock and
+may need to be tuned in special scenarios where the database is
+particularly busy, such as highly concurrent usage.
+
+.SH "INPUT LIST FILE"
+A list file can be used to specify input files, one file per line.
+The initial '@' character indicating a list file is not considered
+part of the file name.  As an example, if the following command line
+option was used:
+
+.nf
+\fB@files.list\fP
+.fi
+
+The 'files.list' file might look like this:
+
+.nf
+data/day1.mseed
+data/day2.mseed
+data/day3.mseed
+.fi
+
+.SH LEAP SECOND LIST FILE
+NOTE: A list of leap seconds is included in the program and no external
+list should be needed unless a leap second is added after year 2023.
+
+If the environment variable LIBMSEED_LEAPSECOND_FILE is set it is
+expected to indicate a file containing a list of leap seconds in NTP
+format.  Some locations where this file can be obtained are indicated
+in RFC 8633 section 3.7:
+https://www.rfc-editor.org/rfc/rfc8633.html#section-3.7
+
+If present, the leap seconds listed in this file will be used to
+adjust the time coverage for records that contain a leap second.
+Also, leap second indicators in the miniSEED headers will be ignored.
+
+.SH AUTHOR
+.nf
+Chad Trabant
+EarthScope Data Services
+.fi

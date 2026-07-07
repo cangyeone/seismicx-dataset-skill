@@ -1,0 +1,4 @@
+interface:
+  display_name: "SeismicX Dataset"
+  short_description: "Build standardized seismic HDF5 datasets"
+  default_prompt: "Use $seismicx-dataset to convert waveform files, index miniSEED, normalize labels, and build a standardized seismic HDF5 dataset."

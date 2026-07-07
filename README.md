@@ -2,140 +2,140 @@
 
 # SeismicX Dataset Skill
 
-Agent-friendly workflows and helper tools for standardized seismological AI
-dataset production from local waveform archives, miniSEED indexes, earthquake
-catalogs, phase-pick annotations, and continuous waveform directories. The
-package is usable from Codex-style skills, OpenCode `AGENTS.md`, Claude Code
-`CLAUDE.md`, or any agent that can read Markdown instructions and run local
-scripts.
+SeismicX Dataset Skill helps an AI coding agent build standardized
+seismological AI datasets from waveform files, miniSEED archives, earthquake
+catalogs, phase-pick annotations, and continuous waveform directories.
 
-## What It Does
+It is designed for OpenCode, Claude Code, Codex, and other agents that can read
+Markdown instructions and run local scripts.
 
-This repository packages a publishable, agent-agnostic skill for making
-standardized SeismicX HDF5 datasets:
+## Install In OpenCode
 
-- Read ObsPy-readable waveform formats such as MSEED, miniSEED, SAC, SEED,
-  GCF, SEGY, SU, and other formats supported by the local ObsPy installation.
-- Convert waveform archives to miniSEED and build an EarthScope `mseedindex`
-  SQLite waveform database.
-- Query the `mseedindex` database and read trimmed waveform windows back from
-  indexed miniSEED files.
-- Infer heterogeneous earthquake catalog, phase-pick, or annotation formats
-  into `seismicx_canonical_labels_v1` JSON.
-- Convert the mini annotation JSON style used by
-  `mini_data/data/label/annotations_mini_two_hours.json` into the canonical
-  label contract.
-- Build two standardized dataset families: event-oriented earthquake datasets
-  and continuous-waveform datasets.
-- Store both families with the same HDF5 hierarchy, group `type` attributes,
-  and standard English metadata fields from the SeismicX dataset standard.
-- Build a dataset SQLite index over produced HDF5 waveform datasets.
-- Read generated HDF5 files with a minimal dataloader compatible with
-  `torch.utils.data.DataLoader` when PyTorch is available.
-
-## Repository Layout
+Open OpenCode and type:
 
 ```text
-SKILL.md
-AGENTS.md
-CLAUDE.md
-agents/openai.yaml
-scripts/seismicx_dataset.py
-references/
-assets/
-logo.png
-README.md
-LICENSE
+Please download https://github.com/cangyeone/seismicx-dataset-skill and install it as a skill.
 ```
 
-Large waveform examples, generated HDF5 files, generated SQLite databases,
-compiled binaries, and local reference datasets are intentionally not published
-in the skill package. The repository does include the EarthScope
-`mseedindex` source tree under `assets/mseedindex/` so agents can build it on
-the user's machine. Small templates such as `assets/stations_template.csv` and
-`assets/label_mapping_template.json` are included for new dataset runs.
+You can also use this more explicit prompt:
 
-## Quick Start
-
-Check dependencies and build or locate the bundled `mseedindex` binary:
-
-```bash
-python scripts/seismicx_dataset.py check-deps
-python scripts/seismicx_dataset.py install-mseedindex
+```text
+Please download cangyeone/seismicx-dataset-skill from GitHub, install it as a skill, and make it available for future seismic dataset-building tasks.
 ```
 
-Convert waveform files to miniSEED and create a waveform database:
+After installation, the skill name is:
 
-```bash
-python scripts/seismicx_dataset.py convert-waveforms \
-  --input <raw_waveforms> \
-  --output-dir work/mseed
-
-python scripts/seismicx_dataset.py index-mseed \
-  --input work/mseed \
-  --db work/waveform.sqlite \
-  --reset
+```text
+$seismicx-dataset
 ```
 
-Normalize earthquake catalog or annotation labels:
+## Use In OpenCode
 
-```bash
-python scripts/seismicx_dataset.py normalize-labels \
-  --input <catalog_or_annotations> \
-  --output work/labels.canonical.json
+Put your waveform files, station metadata, catalogs, or annotation files in the
+current project directory. Then ask OpenCode in plain language:
+
+```text
+Use $seismicx-dataset. Based on the data in the current directory, help me build a standardized seismic dataset.
 ```
 
-If the catalog format is unusual, write a mapping JSON after inspecting
-representative records, then rerun:
+For an earthquake-event dataset, type:
 
-```bash
-python scripts/seismicx_dataset.py normalize-labels \
-  --input <catalog> \
-  --mapping mapping.json \
-  --output work/labels.canonical.json
+```text
+Use $seismicx-dataset. Based on the waveform files and earthquake catalog in the current directory, build an event-style SeismicX HDF5 dataset.
 ```
 
-Use `assets/label_mapping_template.json` as a starting point for custom
-catalogs and `assets/stations_template.csv` for station metadata.
+For a continuous waveform dataset, type:
 
-Build an event-oriented earthquake dataset:
-
-```bash
-python scripts/seismicx_dataset.py make-hdf5 event \
-  --catalog work/labels.canonical.json \
-  --mseed-index-db work/waveform.sqlite \
-  --output work/seismicx_event.h5 \
-  --event-window-before 60 \
-  --event-window-after 180
+```text
+Use $seismicx-dataset. Based on the continuous waveform files in the current directory, build a continuous SeismicX HDF5 dataset split by hour.
 ```
 
-Build a continuous-waveform dataset:
+For an unknown catalog or label format, type:
 
-```bash
-python scripts/seismicx_dataset.py make-hdf5 continuous \
-  --waveform-input work/mseed \
-  --station-csv stations.csv \
-  --output work/seismicx_continuous.h5 \
-  --split-interval hour
+```text
+Use $seismicx-dataset. Please inspect the catalog format in the current directory, infer the fields, convert the labels to canonical JSON, and build the dataset.
 ```
 
-Index and read produced HDF5 datasets:
+For waveform conversion and miniSEED indexing only, type:
 
-```bash
-python scripts/seismicx_dataset.py build-hdf5-index \
-  --h5 "work/seismicx_*.h5" \
-  --db work/dataset_index.sqlite \
-  --reset
-
-python scripts/seismicx_dataset.py example-dataloader \
-  --h5 "work/seismicx_*.h5" \
-  --index-db work/dataset_index.sqlite \
-  --n-samples 3
+```text
+Use $seismicx-dataset. Convert the waveform files in the current directory to miniSEED and build a searchable mseedindex SQLite database.
 ```
+
+## What The Agent Will Do
+
+When you ask OpenCode, Claude Code, or Codex to use this skill, the agent should:
+
+1. Inspect the current directory and identify waveform files, station metadata,
+   catalogs, annotation files, and existing indexes.
+2. Ask whether you want an event-style dataset or a continuous waveform dataset
+   if the directory does not make that clear.
+3. Convert waveform files to miniSEED when needed.
+4. Build an EarthScope `mseedindex` SQLite database for miniSEED waveform
+   search and reading.
+5. Infer and normalize earthquake catalogs or phase-pick labels into canonical
+   JSON.
+6. Write a standardized SeismicX HDF5 dataset.
+7. Build a SQLite index for the generated HDF5 dataset.
+8. Run a small dataloader smoke test so the dataset can be read back.
+
+## What This Skill Can Build
+
+### Event-Style Earthquake Dataset
+
+Use this when you have earthquake catalogs, events, picks, or labels.
+
+The dataset stores:
+
+- Event metadata.
+- Station metadata.
+- Waveform windows around each event when waveform data is available.
+- Phase picks and annotation information as labels.
+- A unified HDF5 hierarchy following the SeismicX dataset standard.
+
+### Continuous Waveform Dataset
+
+Use this when you have long waveform archives and want model-ready continuous
+waveform samples.
+
+The dataset stores:
+
+- Continuous waveform segments split by hour, day, or a custom time interval.
+- Station and channel metadata.
+- Empty label groups, so the continuous dataset has the same structure as the
+  event dataset.
+- A SQLite index and dataloader-compatible access path.
+
+## Expected Input Files
+
+The skill can work with different project layouts. Common inputs include:
+
+- Waveform files: miniSEED, MSEED, SAC, SEED, GCF, SEGY, SU, and other
+  ObsPy-readable formats.
+- Station metadata: CSV files with network, station, location, latitude,
+  longitude, and elevation.
+- Earthquake catalogs: JSON, JSONL, CSV, TSV, or text phase catalogs.
+- Annotation files: files similar to
+  `mini_data/data/label/annotations_mini_two_hours.json`.
+- Existing miniSEED indexes or HDF5 dataset indexes.
+
+If the catalog format is not standard, the agent should inspect examples,
+infer the meaning of the fields, and preserve unmapped information in
+`user_defined`.
+
+## Output Files
+
+A typical run produces:
+
+- `labels.canonical.json`: normalized event and pick labels.
+- `waveform.sqlite`: EarthScope `mseedindex` database for miniSEED files.
+- `seismicx_event.h5` or `seismicx_continuous.h5`: standardized HDF5 dataset.
+- `dataset_index.sqlite`: SQLite index for the HDF5 waveform datasets.
+- `LICENSE` and `md5sum.txt`: dataset sidecar files.
 
 ## Dataset Standard
 
-Both event and continuous datasets use the same top-level HDF5 contract:
+Both dataset types use the same HDF5 structure:
 
 ```text
 /
@@ -145,22 +145,86 @@ Both event and continuous datasets use the same top-level HDF5 contract:
       {station_id}/
         waveform/
           {channel}/
-            {seg_id}
+            {segment_id}
         label/
 ```
 
-Use `references/standard_hdf5_schema.md` as the field contract. Important
-rules:
+The skill uses standard field names such as:
 
-- Keep `information`, `data`, `event`, `station`, `waveform`, `channel`,
-  `trace`, and `label` as the layer `type` values.
-- Use standard names such as `source_origintime`,
-  `source_longitude_deg`, `source_latitude_deg`, `source_depth_km`,
-  `source_magnitude`, `seg_start_time`, and `sample_rate`.
-- Store missing strings as `"none"` and missing numeric values as `NaN`.
-- For event datasets, store picks as labels and use explicit event windows for
-  waveform extraction; do not cut waveform snippets from pick arrival times
-  unless the user explicitly requests that behavior.
+- `source_origintime`
+- `source_longitude_deg`
+- `source_latitude_deg`
+- `source_depth_km`
+- `source_magnitude`
+- `seg_start_time`
+- `sample_rate`
+
+Missing strings are stored as `"none"`. Missing numeric values are stored as
+`NaN`.
+
+## Advanced Command-Line Use
+
+Most users should ask their agent in plain language. The examples below are for
+debugging or manual runs.
+
+Check dependencies and build the bundled EarthScope `mseedindex` tool:
+
+```bash
+python scripts/seismicx_dataset.py check-deps
+python scripts/seismicx_dataset.py install-mseedindex
+```
+
+Convert waveforms and build a miniSEED index:
+
+```bash
+python scripts/seismicx_dataset.py convert-waveforms --input <raw_waveforms> --output-dir work/mseed
+python scripts/seismicx_dataset.py index-mseed --input work/mseed --db work/waveform.sqlite --reset
+```
+
+Normalize labels:
+
+```bash
+python scripts/seismicx_dataset.py normalize-labels --input <catalog_or_annotations> --output work/labels.canonical.json
+```
+
+Build an event dataset:
+
+```bash
+python scripts/seismicx_dataset.py make-hdf5 event --catalog work/labels.canonical.json --mseed-index-db work/waveform.sqlite --output work/seismicx_event.h5
+```
+
+Build a continuous dataset:
+
+```bash
+python scripts/seismicx_dataset.py make-hdf5 continuous --waveform-input work/mseed --station-csv stations.csv --output work/seismicx_continuous.h5 --split-interval hour
+```
+
+Index and test the generated HDF5 dataset:
+
+```bash
+python scripts/seismicx_dataset.py build-hdf5-index --h5 "work/seismicx_*.h5" --db work/dataset_index.sqlite --reset
+python scripts/seismicx_dataset.py example-dataloader --h5 "work/seismicx_*.h5" --index-db work/dataset_index.sqlite --n-samples 3
+```
+
+## Repository Layout
+
+```text
+SKILL.md                  Main skill instructions
+AGENTS.md                 OpenCode and generic agent entrypoint
+CLAUDE.md                 Claude Code entrypoint
+agents/openai.yaml        Skill UI metadata
+scripts/seismicx_dataset.py
+references/               Detailed schema and workflow notes
+assets/mseedindex/        Bundled EarthScope mseedindex source
+assets/stations_template.csv
+assets/label_mapping_template.json
+README.md
+LICENSE
+```
+
+Large waveform archives, generated datasets, generated SQLite databases,
+compiled binaries, local virtual environments, and local reference datasets
+should not be committed to this repository.
 
 ## Related Tools
 

@@ -1,0 +1,22 @@
+{
+  "event_id": "event_id",
+  "source_origintime": "origin_time",
+  "source_longitude_deg": "longitude",
+  "source_latitude_deg": "latitude",
+  "source_depth_km": "depth_km",
+  "source_magnitude": "magnitude",
+  "source_magnitude_type": "magnitude_type",
+  "station_network": "network",
+  "station_station": "station",
+  "station_location": "location",
+  "station_longitude_deg": "station_longitude",
+  "station_latitude_deg": "station_latitude",
+  "station_elevation_m": "station_elevation_m",
+  "phase_name": "phase",
+  "phase_arrival_time": "pick_time",
+  "phase_name_prob": "probability",
+  "phase_name_snr": "snr",
+  "polarity_type": "polarity",
+  "polarity_clarity": "clarity",
+  "phase_annotation_method": "method"
+}

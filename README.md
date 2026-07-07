@@ -9,33 +9,21 @@ catalogs, phase-pick annotations, and continuous waveform directories.
 It is designed for OpenCode, Codex, Claude Code, and other agents that can read
 Markdown instructions and run local scripts.
 
-## Install In OpenCode, Codex, Claude Code, Or Another Agent
+## Install In Any Agent Tool
 
 This repository is an agent skill. You can install it through any coding agent
 that can download a GitHub repository and register or copy a skill directory.
 
-In OpenCode, type:
+In OpenCode, Codex, Claude Code, or another agent tool, you can type:
 
 ```text
-Please download https://github.com/cangyeone/seismicx-dataset-skill and install it as a skill.
+Please download https://github.com/cangyeone/seismicx-dataset-skill and install it as an agent skill for making seismological datasets.
 ```
 
-In Codex, type:
+If your tool needs a more explicit instruction, type:
 
 ```text
-Please download https://github.com/cangyeone/seismicx-dataset-skill and install it as a Codex skill.
-```
-
-In Claude Code, type:
-
-```text
-Please download https://github.com/cangyeone/seismicx-dataset-skill and make it available as a Claude Code skill or project instruction set.
-```
-
-In any other agent tool, type:
-
-```text
-Please download cangyeone/seismicx-dataset-skill from GitHub, install it as an agent-readable skill, and make it available for future seismic dataset-building tasks.
+Please download cangyeone/seismicx-dataset-skill from GitHub, install it as an agent-readable skill, and make it available for future seismic dataset-building tasks. Use SKILL.md, AGENTS.md, or CLAUDE.md depending on what this tool supports.
 ```
 
 After installation, the skill name is:
@@ -47,7 +35,7 @@ $seismicx-dataset
 The repository also includes `AGENTS.md` for OpenCode-style agents,
 `CLAUDE.md` for Claude Code, and `SKILL.md` for Codex-style skill loading.
 
-## Use In OpenCode, Codex, Claude Code, Or Another Agent
+## Use In Any Agent Tool
 
 Put your waveform files, station metadata, catalogs, or annotation files in the
 current project directory. Then ask your agent in plain language.
@@ -55,36 +43,49 @@ current project directory. Then ask your agent in plain language.
 General request:
 
 ```text
-Use $seismicx-dataset. Based on the data in the current directory, help me build a standardized seismic dataset.
+Please make a seismological dataset from the data in the current directory.
+```
+
+Another good general request:
+
+```text
+Please inspect the current directory and build a standardized SeismicX HDF5 dataset from the available waveform, station, catalog, and label files.
 ```
 
 For an earthquake-event dataset, type:
 
 ```text
-Use $seismicx-dataset. Based on the waveform files and earthquake catalog in the current directory, build an event-style SeismicX HDF5 dataset.
+Please build an event-style earthquake dataset from the waveform files and earthquake catalog in the current directory.
 ```
 
 For a continuous waveform dataset, type:
 
 ```text
-Use $seismicx-dataset. Based on the continuous waveform files in the current directory, build a continuous SeismicX HDF5 dataset split by hour.
+Please build a continuous seismological waveform dataset from the data in the current directory and split it by hour.
 ```
 
 For an unknown catalog or label format, type:
 
 ```text
-Use $seismicx-dataset. Please inspect the catalog format in the current directory, infer the fields, convert the labels to canonical JSON, and build the dataset.
+Please inspect the catalog format in the current directory, infer the fields, convert the labels to canonical JSON, and build the dataset.
 ```
 
 For waveform conversion and miniSEED indexing only, type:
 
 ```text
-Use $seismicx-dataset. Convert the waveform files in the current directory to miniSEED and build a searchable mseedindex SQLite database.
+Please convert the waveform files in the current directory to miniSEED and build a searchable mseedindex SQLite database.
+```
+
+Explicit invocation is optional. If your agent supports skill names and you
+want to force this skill, prefix the request with:
+
+```text
+Use $seismicx-dataset.
 ```
 
 ## What The Agent Will Do
 
-When you ask OpenCode, Claude Code, or Codex to use this skill, the agent should:
+When you ask an agent to use this skill, it should:
 
 1. Inspect the current directory and identify waveform files, station metadata,
    catalogs, annotation files, and existing indexes.

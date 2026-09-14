@@ -218,3 +218,120 @@ def test_nested_data_groups_use_attributes_for_index(tmp_path, inputs):
     assert len(ds) == 4
     assert ds[0]["sample_id"] == "catalog/uri/1"
     assert ds[0]["labels"]["phase_name"] == ["P", "P"]
+
+
+def test_continuous_opaque_station_metadata_and_labels(tmp_path, inputs):
+    _, catalog = inputs
+    obj = json.loads(catalog.read_text())
+    obj["events"][0]["stations"][0]["station_id"] = "inventory-001"
+    catalog.write_text(json.dumps(obj))
+    csv_path = tmp_path / "stations.csv"
+    csv_path.write_text("station_id,network,station,location,station_longitude_deg,station_latitude_deg,station_elevation_m,station_depth_m\ninventory-001,XX,TEST,,100,30,10,123\n")
+    output = make(tmp_path, inputs, "continuous", "--station-csv", str(csv_path), "--catalog", str(catalog))
+    item = sx.SeismicXHDF5Dataset(str(output))[0]
+    assert item["station_id"] == "inventory-001"
+    assert item["station_attrs"]["station_depth_m"] == 123
+    assert item["labels"]["phase_name"] == ["P", "P"]
+
+
+def test_station_metadata_does_not_cross_locations(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    tr = trace()
+    tr.stats.location = "10"
+    tr.write(str(raw / "wave.mseed"), format="MSEED")
+    csv_path = tmp_path / "stations.csv"
+    csv_path.write_text("network,station,location,station_depth_m\nXX,TEST,00,123\n")
+    output = make(tmp_path, (raw, None), "continuous", "--station-csv", str(csv_path))
+    item = sx.SeismicXHDF5Dataset(str(output))[0]
+    assert item["station_id"] == "XX.TEST.10"
+    assert np.isnan(item["station_attrs"]["station_depth_m"])
+
+
+@pytest.mark.parametrize("numeric", [False, True])
+@pytest.mark.parametrize("missing_end", [False, True])
+def test_index_numeric_time_optional_end_and_channel_identifier(tmp_path, inputs, numeric, missing_end):
+    output = make(tmp_path, inputs, "event")
+    with h5py.File(output, "r+") as h5:
+        sample = next(iter(h5["data"].values()))
+        st = next(iter(sample.values()))
+        st["waveform"].move("BHZ", "channel-key-1")
+        for channel in st["waveform"].values():
+            del channel["trace_quality"]
+            if numeric:
+                for field in ("start_time", "end_time"):
+                    channel.attrs[field] = float(UTCDateTime(channel.attrs[field]).timestamp)
+            for ds in waveform_datasets(channel):
+                if numeric:
+                    for field in ("seg_start_time", "seg_end_time"):
+                        ds.attrs[field] = float(UTCDateTime(ds.attrs[field]).timestamp)
+                if missing_end:
+                    del ds.attrs["seg_end_time"]
+    assert validate_hdf5(output)["valid"]
+    rows = list(sx.iter_standard_waveform_datasets(output))
+    t0 = float(UTCDateTime("2026-01-01").timestamp)
+    assert len(rows) == 4
+    assert all(t0 <= row["start_epoch"] <= row["end_epoch"] <= t0 + 3 for row in rows)
+    assert {row["channel"] for row in rows} == {"BHZ", "BHN"}
+
+
+def test_index_declared_relative_time(tmp_path, inputs):
+    output = make(tmp_path, inputs, "event")
+    with h5py.File(output, "r+") as h5:
+        sample = next(iter(h5["data"].values()))
+        st = next(iter(sample.values()))
+        for channel in st["waveform"].values():
+            del channel["trace_quality"]
+            channel.attrs["user_defined"] = json.dumps({"time_reference": "2026-01-01T00:00:00Z"})
+            for key in ("start_time", "end_time"):
+                channel.attrs[key] = float(UTCDateTime(channel.attrs[key]) - UTCDateTime("2026-01-01"))
+            for ds in waveform_datasets(channel):
+                for key in ("seg_start_time", "seg_end_time"):
+                    ds.attrs[key] = float(UTCDateTime(ds.attrs[key]) - UTCDateTime("2026-01-01"))
+    assert validate_hdf5(output)["valid"]
+    rows = list(sx.iter_standard_waveform_datasets(output))
+    assert all(row["start_epoch"] >= UTCDateTime("2026-01-01").timestamp for row in rows)
+
+
+def test_optional_quality_end_and_annotation_summary(tmp_path, inputs):
+    output = make(tmp_path, inputs, "event")
+    with h5py.File(output, "r+") as h5:
+        del h5.attrs["annotation_types"]
+        del h5.attrs["annotation_counts"]
+        del h5.attrs["file_size"]
+        sample = next(iter(h5["data"].values()))
+        st = next(iter(sample.values()))
+        for channel in st["waveform"].values():
+            del channel["trace_quality"].attrs["end_time"]
+            del channel.attrs["end_time"]
+            for ds in waveform_datasets(channel):
+                del ds.attrs["seg_end_time"]
+    report = validate_hdf5(output)
+    assert report["valid"], report
+    sx.main(["package-dataset", "--h5", str(output)])
+    assert validate_hdf5(output, release=True)["valid"]
+
+
+@pytest.mark.parametrize("problem", ["mixed-rate", "unaligned", "channel-bounds"])
+def test_validator_quality_grid_and_channel_bounds(tmp_path, inputs, problem):
+    output = make(tmp_path, inputs, "event")
+    with h5py.File(output, "r+") as h5:
+        sample = next(iter(h5["data"].values()))
+        channel = next(iter(sample.values()))["waveform/BHZ"]
+        if problem == "mixed-rate":
+            attrs = dict(channel["0"].attrs)
+            del channel["0"]
+            ds = channel.create_dataset("0", data=np.arange(19, dtype="int32"))
+            for key, value in attrs.items():
+                ds.attrs[key] = value
+            ds.attrs["sample_rate"] = 20.
+        elif problem == "unaligned":
+            for field in ("seg_start_time", "seg_end_time"):
+                channel["1"].attrs[field] = str(UTCDateTime(channel["1"].attrs[field]) + .025)
+        else:
+            del channel["trace_quality"]
+            channel.attrs["start_time"] = "2027-01-01T00:00:00Z"
+    report = validate_hdf5(output)
+    assert not report["valid"]
+    needle = "bounds" if problem == "channel-bounds" else "aligned sampling grid"
+    assert any(needle in error for error in report["errors"]), report

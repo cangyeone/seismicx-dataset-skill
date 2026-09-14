@@ -11,6 +11,7 @@ import fnmatch
 import glob
 import json
 import math
+import numbers
 import os
 import platform
 import re
@@ -1260,11 +1261,11 @@ def cmd_make_hdf5_continuous(args: argparse.Namespace) -> None:
                 location = normalize_location(trace.stats.location)
                 channel = str(trace.stats.channel or "")
                 sid = make_station_id(network, station_code, location)
-                station_meta = dict(station_lookup.get(sid) or station_lookup.get(station_key(sid)) or normalize_station_dict({"station_id": sid}))
-                station_meta.update(station_id=sid, station_network=network or "none", station_station=station_code or "none", station_location=location)
+                station_meta = dict(station_lookup.get(sid) or normalize_station_dict({"station_id": sid}))
+                station_meta.update(station_network=network or "none", station_station=station_code or "none", station_location=location)
                 station_meta["station_channel_list"] = sorted(set(listify(station_meta.get("station_channel_list")) + [channel]))
                 ensure_information_station(info, station_meta, channel)
-                station_ids.add(sid)
+                station_ids.add(station_meta["station_id"])
                 for idx0, idx1, seg_start, seg_end in split_trace_indices(trace, interval_seconds):
                     sample_id = sample_id_from_time("cont", seg_start, interval_seconds)
                     sample_group = data_group.require_group(sample_id)
@@ -1443,12 +1444,14 @@ def attach_continuous_labels(h5: Any, catalog: Dict[str, Any]) -> None:
                         raise ValueError("Resolve label timezone before assigning continuous windows")
                     time = clean_time_string(time + "Z")
                     pick["phase_arrival_time"] = time
-                by_station[station["station_id"]].append((obspy_utc(time), pick))
+                key = (station["station_network"], station["station_station"], normalize_location(station["station_location"]))
+                by_station[key].append((obspy_utc(time), pick))
     counter = Counter()
     for sample in h5["data"].values():
         window = json.loads(sample.attrs["user_defined"])
         for station in sample.values():
-            picks = [pick for time, pick in by_station[station.attrs["station_id"]]
+            key = (station.attrs["station_network"], station.attrs["station_station"], normalize_location(station.attrs["station_location"]))
+            picks = [pick for time, pick in by_station[key]
                      if obspy_utc(window["window_start_time"]) <= time <= obspy_utc(window["window_end_time"])]
             write_label_group(station, picks)
             counter.update(pick["phase_name"] for pick in picks)
@@ -1515,6 +1518,22 @@ def iter_hdf5_files(value: str) -> List[Path]:
     return sorted(Path(x).resolve() for x in glob.glob(value))
 
 
+def indexed_time(value: Any, obj: Any) -> float:
+    if isinstance(value, numbers.Real):
+        # Relative seconds use the nearest declared reference; otherwise numeric time is Unix seconds.
+        parent = obj
+        while True:
+            metadata = json.loads(parent.attrs.get("user_defined", "{}"))
+            reference = metadata.get("time_reference") if isinstance(metadata, dict) else None
+            if reference is not None:
+                return float(obspy_utc(reference).timestamp) + float(value)
+            if parent.name == "/":
+                break
+            parent = parent.parent
+        return float(value)
+    return float(obspy_utc(value).timestamp)
+
+
 def iter_standard_waveform_datasets(h5_file: Path) -> Iterator[Dict[str, Any]]:
     h5py = import_required("h5py", "Install with: python -m pip install h5py")
     with h5py.File(h5_file, "r") as h5:
@@ -1530,14 +1549,17 @@ def iter_standard_waveform_datasets(h5_file: Path) -> Iterator[Dict[str, Any]]:
             network = str(station_group.attrs.get("station_network", "none"))
             station = str(station_group.attrs.get("station_station", "none"))
             location = normalize_location(station_group.attrs.get("station_location"))
-            start = str(ds.attrs.get("seg_start_time", ds.attrs.get("starttime", "")))
-            end = str(ds.attrs.get("seg_end_time", ds.attrs.get("endtime", "")))
+            start = ds.attrs.get("seg_start_time", ds.attrs.get("starttime", "none"))
+            end = ds.attrs.get("seg_end_time", ds.attrs.get("endtime", "none"))
+            sample_rate = parse_float(ds.attrs.get("sample_rate", ds.attrs.get("sampling_rate")))
             try:
-                start_epoch = float(obspy_utc(start).timestamp)
-                end_epoch = float(obspy_utc(end).timestamp)
+                start_epoch = indexed_time(start, ds)
+                end_epoch = (start_epoch + (len(ds) - 1) / sample_rate) if end == "none" else indexed_time(end, ds)
             except Exception:
                 start_epoch = math.nan
                 end_epoch = math.nan
+            if end == "none" and math.isfinite(end_epoch):
+                end = str(obspy_utc(end_epoch))
             yield {
                 "h5_file": str(h5_file.resolve()),
                 "dataset_path": "/" + name,
@@ -1546,12 +1568,12 @@ def iter_standard_waveform_datasets(h5_file: Path) -> Iterator[Dict[str, Any]]:
                 "network": str(ds.attrs.get("network", network)),
                 "station": str(ds.attrs.get("station", station)),
                 "location": normalize_location(ds.attrs.get("location", location)),
-                "channel": str(ds.attrs.get("channel", parts[-2] if len(parts) > 1 else "")),
-                "starttime": start,
-                "endtime": end,
+                "channel": str(ds.parent.attrs.get("station_channel_id", ds.attrs.get("channel", parts[-2] if len(parts) > 1 else ""))),
+                "starttime": str(start),
+                "endtime": str(end),
                 "start_epoch": start_epoch,
                 "end_epoch": end_epoch,
-                "sample_rate": parse_float(ds.attrs.get("sample_rate", ds.attrs.get("sampling_rate"))),
+                "sample_rate": sample_rate,
                 "npts": parse_int(ds.attrs.get("npts"), int(ds.shape[0]) if ds.shape else 0),
                 "dtype": str(ds.dtype),
                 "source_file": str(json.loads(ds.attrs.get("user_defined", "{}" )).get("source_file", ds.attrs.get("source_file", ""))),
@@ -1683,7 +1705,7 @@ class SeismicXHDF5Dataset:
                 quality = ds.parent["trace_quality"]
                 item["trace_quality"] = quality[()]
                 item["trace_quality_attrs"] = dict(quality.attrs)
-                item["trace_quality_offset"] = round(float(obspy_utc(ds.attrs["seg_start_time"]) - obspy_utc(quality.attrs["start_time"])) * float(quality.attrs["sample_rate"]))
+                item["trace_quality_offset"] = round((indexed_time(ds.attrs["seg_start_time"], ds) - indexed_time(quality.attrs["start_time"], quality)) * float(quality.attrs["sample_rate"]))
         return item
 
 

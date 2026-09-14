@@ -126,6 +126,14 @@ produce separate segments. Never interpolate or zero-fill missing waveforms
 all files are read. End time is the last sample: start+(npts-1)/rate.
 Source file references are stored in user_defined.
 
+End-time attributes are optional; readers derive missing ends from start,
+length and sample_rate. Numeric timestamps remain numeric during indexing.
+For numeric relative seconds, declare an ISO UTC time_reference inside
+user_defined on the trace, channel or an ancestor; the nearest declaration
+supplies the reference for index queries. Without it, this profile's reader
+interprets numeric timestamps as Unix seconds. Keep channel and segment time
+coordinates consistent and document the convention before ingesting data.
+
 Flags: D = unknown QC state; R = raw/no QC; Q = QC applied; M = metadata adjusted
 without changing time-series values. Preserve supplied flags. Passing a
 schema check does not justify Q.

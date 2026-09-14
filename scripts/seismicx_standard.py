@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import numbers
 from pathlib import Path
 
 
@@ -104,9 +105,16 @@ def waveform_datasets(channel):
 
 def epoch(value):
     from obspy import UTCDateTime
-    if isinstance(value, (int, float)):
+    if isinstance(value, numbers.Real):
         return float(value)
     return float(UTCDateTime(str(value)).timestamp)
+
+
+def segment_end(ds):
+    rate = float(ds.attrs["sample_rate"])
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError(f"{ds.name}: invalid sample_rate")
+    return epoch(ds.attrs["seg_start_time"]) + (len(ds) - 1) / rate
 
 
 def finalize_channels(h5, trace_quality=False, max_quality_samples=10000000):
@@ -365,8 +373,14 @@ def validate_hdf5(path, release=False):
                     ordered = sorted(traces, key=lambda ds: epoch(ds.attrs.get("seg_start_time", 0)))
                     if [ds.attrs.get("seg_id") for ds in ordered] != list(range(len(ordered))):
                         error(obj, "seg_id must start at zero and follow start-time order")
+                    if ordered:
+                        channel_start = epoch(obj.attrs.get("start_time", 0))
+                        channel_end_value = obj.attrs.get("end_time", "none")
+                        channel_end = max(segment_end(ds) for ds in ordered) if channel_end_value == "none" else epoch(channel_end_value)
+                        if channel_start > epoch(ordered[0].attrs["seg_start_time"]) + 1e-6 or channel_end < max(segment_end(ds) for ds in ordered) - 1e-6 or channel_end < channel_start:
+                            error(obj, "channel bounds contradict waveform segments")
                     channel_id = obj.attrs.get("station_channel_id")
-                    if channel_id not in obj.parent.parent.attrs.get("station_channel_list", []):
+                    if "station_channel_list" in obj.parent.parent.attrs and channel_id not in obj.parent.parent.attrs["station_channel_list"]:
                         error(obj, "channel code missing from station_channel_list")
                     orientation = np.asarray(obj.attrs.get("orientation", []))
                     if orientation.shape not in {(0,), (2,)}:
@@ -389,7 +403,7 @@ def validate_hdf5(path, release=False):
                         error(obj, "trace requires positive sample_rate and nonempty data")
                     else:
                         start_key, end_key = ("start_time", "end_time") if quality else ("seg_start_time", "seg_end_time")
-                        if end_key in obj.attrs:
+                        if end_key in obj.attrs and obj.attrs[end_key] != "none":
                             expected = epoch(obj.attrs.get(start_key, 0)) + (len(obj) - 1) / sr
                             if abs(epoch(obj.attrs[end_key]) - expected) > max(1e-6, 1e-3 / sr):
                                 error(obj, "end time disagrees with length/sample_rate")
@@ -398,8 +412,18 @@ def validate_hdf5(path, release=False):
                             error(obj, "quality sequence must be named trace_quality")
                         if obj.dtype.kind not in "iu":
                             error(obj, "quality codes must be integers")
-                        if obj.attrs.get("start_time") != obj.parent.attrs.get("start_time") or obj.attrs.get("end_time") != obj.parent.attrs.get("end_time"):
-                            error(obj, "quality timeline must cover the whole channel")
+                        if math.isfinite(sr) and sr > 0:
+                            traces = waveform_datasets(obj.parent)
+                            quality_start = epoch(obj.attrs["start_time"])
+                            quality_end = quality_start + (len(obj) - 1) / sr
+                            channel_end_value = obj.parent.attrs.get("end_time", "none")
+                            channel_end = max(segment_end(ds) for ds in traces) if channel_end_value == "none" else epoch(channel_end_value)
+                            if abs(quality_start - epoch(obj.parent.attrs["start_time"])) > 1e-6 or abs(quality_end - channel_end) > max(1e-6, 1e-3 / sr):
+                                error(obj, "quality timeline must cover the whole channel")
+                            for ds in traces:
+                                offset = (epoch(ds.attrs["seg_start_time"]) - quality_start) * sr
+                                if float(ds.attrs["sample_rate"]) != sr or abs(offset - round(offset)) > 1e-3:
+                                    error(obj, "quality timeline and waveform segments need one aligned sampling grid")
                     else:
                         trace_count[0] += 1
                         for offset in range(0, len(obj), 1000000):
@@ -458,11 +482,11 @@ def validate_hdf5(path, release=False):
                 error(h5, "num_events counts earthquake events, not continuous windows")
             types = list(h5.attrs.get("annotation_types", []))
             counts = list(h5.attrs.get("annotation_counts", []))
-            if len(types) != len(counts) or dict(zip(types, counts)) != phase_counts:
+            if "annotation_types" in h5.attrs and "annotation_counts" in h5.attrs and (len(types) != len(counts) or dict(zip(types, counts)) != phase_counts):
                 error(h5, "annotation types/counts disagree with labels")
             expected_json = export_metadata(h5)
             checksum_name = str(h5.attrs.get("md5", "md5sum.txt"))
-            if release and json_value(h5.attrs.get("file_size")) != f"{path.stat().st_size} bytes":
+            if release and "file_size" in h5.attrs and json_value(h5.attrs["file_size"]) != "none" and json_value(h5.attrs["file_size"]) != f"{path.stat().st_size} bytes":
                 error(h5, "file_size is not the finalized HDF5 size")
         if release:
             sidecar = path.with_suffix(".json")

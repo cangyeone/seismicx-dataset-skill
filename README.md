@@ -9,6 +9,11 @@ catalogs, phase-pick annotations, and continuous waveform directories.
 It is designed for OpenCode, Codex, Claude Code, and other agents that can read
 Markdown instructions and run local scripts.
 
+It also answers questions about preparing seismological datasets, choosing a
+dataset mode, organizing labels, interpreting quality flags, and reading data.
+The current implementation follows the supplied **2026-08-31 revision draft**
+of the Specification for Seismological Artificial Intelligence Datasets.
+
 ## Install In Any Agent Tool
 
 This repository is an agent skill. You can install it through any coding agent
@@ -85,6 +90,19 @@ Use $seismicx-dataset.
 
 ## What The Agent Will Do
 
+For a question, the agent explains the workflow without creating files or
+installing tools. You can ask in English, Chinese, or your preferred language:
+
+```text
+How do I make a seismological dataset, and what files should I prepare?
+Should I choose an event dataset or a continuous waveform dataset?
+Can I build a continuous dataset without labels?
+What are trace_quality, quality_flag, and quality_metric?
+How do I validate a dataset and load it for training?
+```
+
+For a dataset-building request, it follows the production steps below.
+
 When you ask an agent to use this skill, it should:
 
 1. Inspect the current directory and identify waveform files, station metadata,
@@ -99,6 +117,8 @@ When you ask an agent to use this skill, it should:
 6. Write a standardized SeismicX HDF5 dataset.
 7. Build a SQLite index for the generated HDF5 dataset.
 8. Run a small dataloader smoke test so the dataset can be read back.
+9. Export hierarchical JSON, include your data license, generate complete
+   checksums, and validate the release against the revision's schema.
 
 ## What This Skill Can Build
 
@@ -123,8 +143,9 @@ The dataset stores:
 
 - Continuous waveform segments split by hour, day, or a custom time interval.
 - Station and channel metadata.
-- Empty label groups, so the continuous dataset has the same structure as the
-  event dataset.
+- Optional labels assigned to existing windows, or empty label groups when
+  labels are unavailable.
+- Optional per-sample quality timelines identifying gaps and overlaps.
 - A SQLite index and dataloader-compatible access path.
 
 ## Expected Input Files
@@ -152,9 +173,15 @@ A typical run produces:
 - `waveform.sqlite`: EarthScope `mseedindex` database for miniSEED files.
 - `seismicx_event.h5` or `seismicx_continuous.h5`: standardized HDF5 dataset.
 - `dataset_index.sqlite`: SQLite index for the HDF5 waveform datasets.
-- `LICENSE` and `md5sum.txt`: dataset sidecar files.
+- A matching `.json` file: metadata and labels exported from the HDF5 hierarchy.
+- `LICENSE`: the data owner's usage terms.
+- `checksums.md5` and `md5sum.txt`: identical manifests covering release files.
 
 ## Dataset Standard
+
+The current profile is `seismicx_standard_hdf5_v2`, based on the supplied
+2026-08-31 revision draft. The source document still uses a placeholder
+standard number; this is not a claim of certification under a published standard.
 
 Both dataset types use the same HDF5 structure:
 
@@ -167,6 +194,7 @@ Both dataset types use the same HDF5 structure:
         waveform/
           {channel}/
             {segment_id}
+            trace_quality              optional full-channel quality timeline
         label/
 ```
 
@@ -181,12 +209,27 @@ The skill uses standard field names such as:
 - `sample_rate`
 
 Missing strings are stored as `"none"`. Missing numeric values are stored as
-`NaN`.
+`NaN` in HDF5 and `null` in JSON. Standard lists are native HDF5 arrays.
+Event samples use table D.2; continuous samples use table D.1 without invented
+earthquake parameters. Gaps are stored as separate segments, with no filling
+or interpolation, and overlapping records are retained.
+
+Use a dedicated release directory and provide your data's license. After
+adding indexes, StationXML, or run notes, run `package-dataset` again so JSON
+and checksums reflect the final files. The waveform unit must come from your
+source metadata; conversion to miniSEED alone does not establish it.
+
+See [the schema reference](references/standard_hdf5_schema.md) for fields,
+quality sequences, release rules, and legacy v1 migration, and
+[dataset questions](references/dataset_questions.md) for practical guidance.
 
 ## Advanced Command-Line Use
 
 Most users should ask their agent in plain language. The examples below are for
 debugging or manual runs.
+
+`DATA_LICENSE` means a UTF-8 text file containing the data owner's actual
+license terms. Replace `counts` below with the verified waveform unit.
 
 Check dependencies and build the bundled EarthScope `mseedindex` tool:
 
@@ -211,20 +254,25 @@ python scripts/seismicx_dataset.py normalize-labels --input <catalog_or_annotati
 Build an event dataset:
 
 ```bash
-python scripts/seismicx_dataset.py make-hdf5 event --catalog work/labels.canonical.json --mseed-index-db work/waveform.sqlite --output work/seismicx_event.h5
+python scripts/seismicx_dataset.py make-hdf5 event --catalog work/labels.canonical.json --mseed-index-db work/waveform.sqlite --output release/seismicx_event.h5 --license-file DATA_LICENSE --unit counts
 ```
 
 Build a continuous dataset:
 
 ```bash
-python scripts/seismicx_dataset.py make-hdf5 continuous --waveform-input work/mseed --station-csv stations.csv --output work/seismicx_continuous.h5 --split-interval hour
+python scripts/seismicx_dataset.py make-hdf5 continuous --waveform-input work/mseed --station-csv stations.csv --output release/seismicx_continuous.h5 --split-interval hour --license-file DATA_LICENSE --unit counts
 ```
+
+Add `--catalog work/labels.canonical.json` to attach continuous labels, or
+`--trace-quality` to either mode for a full-channel gap/overlap quality sequence.
 
 Index and test the generated HDF5 dataset:
 
 ```bash
-python scripts/seismicx_dataset.py build-hdf5-index --h5 "work/seismicx_*.h5" --db work/dataset_index.sqlite --reset
-python scripts/seismicx_dataset.py example-dataloader --h5 "work/seismicx_*.h5" --index-db work/dataset_index.sqlite --n-samples 3
+python scripts/seismicx_dataset.py build-hdf5-index --h5 "release/seismicx_*.h5" --db release/dataset_index.sqlite --reset
+python scripts/seismicx_dataset.py example-dataloader --h5 "release/seismicx_*.h5" --index-db release/dataset_index.sqlite --n-samples 3
+python scripts/seismicx_dataset.py package-dataset --h5 "release/seismicx_*.h5"
+python scripts/seismicx_dataset.py validate-hdf5 --h5 "release/seismicx_*.h5" --release
 ```
 
 ## Repository Layout
@@ -235,7 +283,9 @@ AGENTS.md                 OpenCode and generic agent entrypoint
 CLAUDE.md                 Claude Code entrypoint
 agents/openai.yaml        Skill UI metadata
 scripts/seismicx_dataset.py
+scripts/seismicx_standard.py
 references/               Detailed schema and workflow notes
+tests/test_standard.py    Synthetic end-to-end regression tests
 assets/mseedindex/        Bundled EarthScope mseedindex source
 assets/stations_template.csv
 assets/label_mapping_template.json

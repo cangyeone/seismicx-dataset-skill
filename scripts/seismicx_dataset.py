@@ -9,7 +9,6 @@ import csv
 import datetime as _dt
 import fnmatch
 import glob
-import hashlib
 import json
 import math
 import os
@@ -23,7 +22,12 @@ import tempfile
 import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+
+from seismicx_standard import (
+    MAX_STRING_BYTES, STANDARD_REVISION, finalize_channels, json_text, json_value,
+    set_standard_attrs, validate_hdf5, write_checksums, write_release_sidecars,
+)
 
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
@@ -33,7 +37,7 @@ MSEEDINDEX_REPO = "https://github.com/EarthScope/mseedindex.git"
 
 DEFAULT_LOCATION = "--"
 CANONICAL_FORMAT = "seismicx_canonical_labels_v1"
-HDF5_FORMAT = "seismicx_standard_hdf5_v1"
+HDF5_FORMAT = "seismicx_standard_hdf5_v2"
 
 WAVEFORM_SUFFIXES = {
     ".mseed",
@@ -253,8 +257,12 @@ def clean_time_string(value: Any) -> str:
     text = text.replace("/", "-")
     if " " in text and "T" not in text:
         text = text.replace(" ", "T", 1)
-    if text.endswith("Z"):
-        return text
+    try:
+        parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(_dt.timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+    except ValueError:
+        pass
     if re.match(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", text):
         return text
     return text
@@ -263,7 +271,7 @@ def clean_time_string(value: Any) -> str:
 def canonical_pick_method(value: Any, automatic_default: str = "automatic_unknown") -> str:
     text = str(value or "").strip()
     if not text or text.lower() in {"none", "null"}:
-        return "manual_unknown"
+        return "none"
     lowered = text.lower()
     if lowered.startswith(("manual_", "automatic_")):
         return text
@@ -271,7 +279,7 @@ def canonical_pick_method(value: Any, automatic_default: str = "automatic_unknow
         return "manual_unknown"
     if lowered in {"automatic", "auto"}:
         return automatic_default
-    return f"manual_{text}" if lowered in {"m", "man"} else text
+    return "manual_unknown" if lowered in {"m", "man"} else "none"
 
 
 def pick_value(row: Dict[str, Any], field: str, mapping: Optional[Dict[str, Any]] = None, default: Any = None) -> Any:
@@ -296,26 +304,29 @@ def pick_value(row: Dict[str, Any], field: str, mapping: Optional[Dict[str, Any]
 
 
 def safe_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
-
-
-def h5_attr_value(value: Any) -> Any:
-    if value is None:
-        return "none"
-    if isinstance(value, (list, tuple, dict)):
-        return safe_json(value)
-    if isinstance(value, bool):
-        return bool(value)
-    if isinstance(value, int):
-        return int(value)
-    if isinstance(value, float):
-        return float(value)
-    return str(value)
+    return json_text(value)
 
 
 def set_attrs(obj: Any, attrs: Dict[str, Any]) -> None:
-    for key, value in attrs.items():
-        obj.attrs[key] = h5_attr_value(value)
+    set_standard_attrs(obj, attrs)
+
+
+def preserve_unmapped(raw: Dict[str, Any], fields: Sequence[str], mapping=None) -> Dict[str, Any]:
+    known = set(fields) | {"type", "user_defined", "stations", "picks"}
+    for field in fields:
+        known.update(ALIASES.get(field, (field,)))
+        if mapping and field in mapping:
+            known.update(listify(mapping[field]))
+    known = {str(key).lower() for key in known}
+    existing = raw.get("user_defined", {})
+    out = dict(existing) if isinstance(existing, dict) else {"original_user_defined": existing}
+    extra = {k: v for k, v in raw.items() if str(k).lower() not in known}
+    for key, value in extra.items():
+        if key in out and out[key] != value:
+            out.setdefault("unmapped_source_fields", {})[key] = value
+        else:
+            out[key] = value
+    return out
 
 
 def stable_event_id(event_time: str, lat: Any, lon: Any, fallback: str) -> str:
@@ -324,6 +335,11 @@ def stable_event_id(event_time: str, lat: Any, lon: Any, fallback: str) -> str:
 
 
 def normalize_event_dict(raw: Dict[str, Any], mapping: Optional[Dict[str, Any]] = None, fallback_id: str = "event") -> Dict[str, Any]:
+    raw = dict(raw)
+    for field in EVENT_FIELDS:
+        value = pick_value(raw, field, mapping)
+        if value is not None:
+            raw[field] = value
     event_time = clean_time_string(pick_value(raw, "source_origintime", mapping, "none"))
     lon = parse_float(pick_value(raw, "source_longitude_deg", mapping))
     lat = parse_float(pick_value(raw, "source_latitude_deg", mapping))
@@ -341,7 +357,7 @@ def normalize_event_dict(raw: Dict[str, Any], mapping: Optional[Dict[str, Any]] 
         "source_origintime": event_time,
         "source_origintime_err": parse_float(raw.get("source_origintime_err")),
         "source_origintime_ref": parse_float(raw.get("source_origintime_ref")),
-        "time_standard": str(raw.get("time_standard", "UTC") or "UTC"),
+        "time_standard": str(raw.get("time_standard") or ("UTC" if event_time.endswith("Z") else "none")),
         "source_longitude_deg": lon,
         "source_latitude_deg": lat,
         "source_depth_km": parse_float(pick_value(raw, "source_depth_km", mapping)),
@@ -353,8 +369,8 @@ def normalize_event_dict(raw: Dict[str, Any], mapping: Optional[Dict[str, Any]] 
         "source_agency": str(pick_value(raw, "source_agency", mapping, "none") or "none"),
         "location_method": str(raw.get("location_method", "none") or "none"),
         "velocity_model_id": str(raw.get("velocity_model_id", "none") or "none"),
-        "num_phases_used": parse_int(raw.get("num_phases_used"), 0),
-        "num_stations_used": parse_int(raw.get("num_stations_used"), 0),
+        "num_phases_used": parse_int(raw.get("num_phases_used"), math.nan),
+        "num_stations_used": parse_int(raw.get("num_stations_used"), math.nan),
         "max_azimuthal_gap_deg": parse_float(raw.get("max_azimuthal_gap_deg")),
         "station_azimuth_uniformity": parse_float(raw.get("station_azimuth_uniformity")),
         "min_epicentral_dist_km": parse_float(raw.get("min_epicentral_dist_km")),
@@ -372,7 +388,19 @@ def normalize_event_dict(raw: Dict[str, Any], mapping: Optional[Dict[str, Any]] 
         "source_fault_plane_err": listify(raw.get("source_fault_plane_err")),
         "event_remark": str(raw.get("event_remark", "none") or "none"),
         "stations": [],
+        "user_defined": preserve_unmapped(raw, EVENT_FIELDS, mapping),
     }
+    if event["source_type"] == "event":
+        event["source_type"] = "none"
+    if event["time_standard"] == "UTC" and event_time != "none" and not event_time.endswith("Z"):
+        event["source_origintime"] = clean_time_string(event_time + "Z")
+    count = len(event["source_magnitude_type"])
+    if len(event["source_magnitude"]) != count:
+        raise ValueError(f"{event_id}: magnitude types and values must have equal lengths")
+    errors = event["source_magnitude_error"]
+    event["source_magnitude_error"] = [parse_float(x) for x in errors] if errors else [math.nan] * count
+    if len(event["source_magnitude_error"]) != count:
+        raise ValueError(f"{event_id}: magnitude errors must align with magnitude types")
     return event
 
 
@@ -380,11 +408,14 @@ def normalize_station_dict(raw: Dict[str, Any], mapping: Optional[Dict[str, Any]
     station_id = str(pick_value(raw, "station_id", mapping, "") or "").strip()
     network = pick_value(raw, "station_network", mapping, None)
     station = pick_value(raw, "station_station", mapping, None)
-    location = pick_value(raw, "station_location", mapping, DEFAULT_LOCATION)
+    location = pick_value(raw, "station_location", mapping, None)
     if not station_id and network and station:
         station_id = make_station_id(network, station, location)
-    if station_id:
-        network, station, location = split_station_id(station_id)
+    if station_id and "." in station_id:
+        id_network, id_station, id_location = split_station_id(station_id)
+        network = network or id_network
+        station = station or id_station
+        location = location if location is not None else id_location
     station_id = station_id or make_station_id(network or "", station or "", location)
 
     channels = listify(pick_value(raw, "station_channel_list", mapping, []))
@@ -393,29 +424,30 @@ def normalize_station_dict(raw: Dict[str, Any], mapping: Optional[Dict[str, Any]
     return {
         "type": "station",
         "station_id": station_id,
-        "station_network": str(network or ""),
-        "station_station": str(station or ""),
+        "station_network": str(network or "none"),
+        "station_station": str(station or "none"),
         "station_location": normalize_location(location),
         "station_channel_list": channels,
         "station_longitude_deg": parse_float(pick_value(raw, "station_longitude_deg", mapping)),
         "station_latitude_deg": parse_float(pick_value(raw, "station_latitude_deg", mapping)),
         "station_elevation_m": parse_float(pick_value(raw, "station_elevation_m", mapping)),
-        "station_depth_m": parse_float(pick_value(raw, "station_depth_m", mapping), 0.0),
+        "station_depth_m": parse_float(pick_value(raw, "station_depth_m", mapping)),
         "station_area": str(raw.get("station_area", "none") or "none"),
         "station_agency": str(raw.get("station_agency", "none") or "none"),
         "station_remark": str(raw.get("station_remark", "none") or "none"),
         "picks": [],
+        "user_defined": preserve_unmapped(raw, STATION_FIELDS, mapping),
     }
 
 
 def normalize_pick_dict(raw: Dict[str, Any], mapping: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     method = canonical_pick_method(pick_value(raw, "phase_annotation_method", mapping, raw.get("status")))
-    polarity_method = canonical_pick_method(raw.get("polarity_annotation_method", method))
-    user_defined = {
-        k: v
-        for k, v in raw.items()
-        if k not in set(sum((list(v) for v in ALIASES.values()), [])) and k not in LABEL_FIELDS
-    }
+    polarity_method = canonical_pick_method(pick_value(raw, "polarity_annotation_method", mapping))
+    user_defined = preserve_unmapped(raw, LABEL_FIELDS, mapping)
+    for field, normalized in (("phase_annotation_method", method), ("polarity_annotation_method", polarity_method)):
+        original = pick_value(raw, field, mapping)
+        if original and normalized == "none" and original != "none":
+            user_defined[f"original_{field}"] = original
     return {
         "type": "label",
         "phase_name": str(pick_value(raw, "phase_name", mapping, "none") or "none"),
@@ -426,7 +458,7 @@ def normalize_pick_dict(raw: Dict[str, Any], mapping: Optional[Dict[str, Any]] =
         "polarity_clarity": str(pick_value(raw, "polarity_clarity", mapping, "none") or "none"),
         "phase_annotation_method": method,
         "polarity_annotation_method": polarity_method,
-        "user_defined": raw.get("user_defined", user_defined),
+        "user_defined": user_defined,
     }
 
 
@@ -438,6 +470,7 @@ def canonical_from_mini_annotations(obj: Dict[str, Any]) -> Dict[str, Any]:
                 raw_event = dict(event_node.get("event", {}))
                 raw_event.setdefault("event_id", event_node.get("event_id", event_id))
                 event = normalize_event_dict(raw_event, fallback_id=str(event_id))
+                event["user_defined"]["source_annotation_metadata"] = {k: v for k, v in event_node.items() if k not in {"event", "stations"}}
                 preferred_origin = event_node.get("preferred_origin", {}) or {}
                 preferred_magnitude = event_node.get("preferred_magnitude", {}) or {}
                 if preferred_origin:
@@ -445,6 +478,8 @@ def canonical_from_mini_annotations(obj: Dict[str, Any]) -> Dict[str, Any]:
                     event["source_longitude_deg"] = parse_float(preferred_origin.get("longitude"), event["source_longitude_deg"])
                     event["source_latitude_deg"] = parse_float(preferred_origin.get("latitude"), event["source_latitude_deg"])
                     event["source_depth_km"] = parse_float(preferred_origin.get("depth_m"), math.nan) / 1000.0
+                    if event["source_origintime"].endswith("Z"):
+                        event["time_standard"] = "UTC"
                 if preferred_magnitude:
                     event["source_magnitude"] = [parse_float(preferred_magnitude.get("mag"))]
                     event["source_magnitude_type"] = [str(preferred_magnitude.get("magnitude_type", "none"))]
@@ -501,8 +536,6 @@ def canonical_from_flat_rows(rows: Sequence[Dict[str, Any]], mapping: Optional[D
 
     for event_id, event in events_by_id.items():
         event["stations"] = list(stations_by_event[event_id].values())
-        event["num_stations_used"] = len(event["stations"])
-        event["num_phases_used"] = sum(len(st.get("picks", [])) for st in event["stations"])
 
     return {
         "format": CANONICAL_FORMAT,
@@ -529,8 +562,6 @@ def looks_like_flat_pick(row: Dict[str, Any]) -> bool:
 
 
 def canonical_from_json(obj: Any, mapping: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if isinstance(obj, dict) and obj.get("format") == CANONICAL_FORMAT:
-        return obj
     if isinstance(obj, dict) and "years" in obj:
         return canonical_from_mini_annotations(obj)
     if isinstance(obj, dict) and isinstance(obj.get("events"), list):
@@ -546,7 +577,7 @@ def canonical_from_json(obj: Any, mapping: Optional[Dict[str, Any]] = None) -> D
                 station["picks"] = [normalize_pick_dict(p, mapping) for p in picks if isinstance(p, dict)]
                 event["stations"].append(station)
             events.append(event)
-        return {"format": CANONICAL_FORMAT, "events": events, "metadata": {"source_format": "events_list", "warnings": []}}
+        return {"format": CANONICAL_FORMAT, "events": events, "metadata": obj.get("metadata", {"source_format": "events_list", "warnings": []})}
     if isinstance(obj, list) and all(isinstance(x, dict) for x in obj):
         return canonical_from_flat_rows(obj, mapping)
 
@@ -574,7 +605,7 @@ def parse_cea_time(tokens: Sequence[str], year_idx: int, month_idx: int, day_idx
         micro = str(tokens[micro_idx]).ljust(6, "0")[:6]
         text = (
             f"{tokens[year_idx]}-{str(tokens[month_idx]).zfill(2)}-{str(tokens[day_idx]).zfill(2)}T"
-            f"{str(tokens[hour_idx]).zfill(2)}:{str(tokens[minute_idx]).zfill(2)}:{second}.{micro}Z"
+            f"{str(tokens[hour_idx]).zfill(2)}:{str(tokens[minute_idx]).zfill(2)}:{second}.{micro}"
         )
         return text
     except Exception:
@@ -597,7 +628,7 @@ def parse_cea_phase_catalog(path: Path) -> Dict[str, Any]:
             "source_origintime": parse_cea_time(head, 3, 4, 5, 7, 8, 9, 10),
             "source_longitude_deg": head[12],
             "source_latitude_deg": head[13],
-            "source_depth_km": -1 if head[15] == "NONE" else head[15],
+            "source_depth_km": None if head[15] == "NONE" else head[15],
             "source_magnitude": head[18],
             "source_magnitude_type": "none",
             "event_remark": ",".join(head),
@@ -735,6 +766,8 @@ def cmd_check_deps(args: argparse.Namespace) -> None:
 def cmd_convert_waveforms(args: argparse.Namespace) -> None:
     obspy = import_required("obspy", "Install with: python -m pip install obspy")
     read = obspy.read
+    if args.merge or args.fill_value.lower() != "none":
+        raise SystemExit("The 2026-08-31 profile preserves gaps and overlaps. Omit --merge and --fill-value; missing data is split, never interpolated.")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     suffixes = None if args.all_files else {x.lower() for x in args.suffixes.split(",") if x.strip()}
@@ -745,9 +778,7 @@ def cmd_convert_waveforms(args: argparse.Namespace) -> None:
     for index, file_path in enumerate(files, start=1):
         try:
             stream = read(str(file_path), format=args.obspy_format) if args.obspy_format else read(str(file_path))
-            if args.merge:
-                fill_value = None if args.fill_value.lower() == "none" else float(args.fill_value)
-                stream.merge(method=1, fill_value=fill_value)
+            stream = split_missing_stream(stream)
             safe_stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", file_path.stem)
             out_path = output_dir / f"{safe_stem}.mseed"
             if out_path.exists() and not args.overwrite:
@@ -820,7 +851,7 @@ def query_tsindex_rows(db_path: str, network: str, station: str, location: str, 
     params: List[Any] = [
         wildcard_to_sql(network),
         wildcard_to_sql(station),
-        wildcard_to_sql(location),
+        "" if location == DEFAULT_LOCATION else wildcard_to_sql(location),
         wildcard_to_sql(channel),
         sql_time(starttime),
         sql_time(endtime),
@@ -853,8 +884,7 @@ def read_stream_from_tsindex_rows(rows: Sequence[sqlite3.Row], starttime: Any, e
         try:
             stream = read(filename)
         except Exception as exc:
-            print(f"[WARN] Could not read indexed file {filename}: {exc}")
-            continue
+            raise ValueError(f"Could not read indexed file {filename}: {exc}") from exc
         for trace in stream:
             stats = trace.stats
             if str(stats.network) != str(row["network"]):
@@ -868,7 +898,7 @@ def read_stream_from_tsindex_rows(rows: Sequence[sqlite3.Row], starttime: Any, e
             if trace.stats.endtime < start or trace.stats.starttime > end:
                 continue
             tr = trace.copy()
-            tr.trim(start, end, pad=False)
+            tr.trim(start, end, pad=False, nearest_sample=False)
             tr.stats.seismicx_source_file = filename
             out += tr
     return out
@@ -895,7 +925,11 @@ def cmd_normalize_labels(args: argparse.Namespace) -> None:
     canonical["metadata"]["source_file"] = str(Path(args.input))
     canonical["metadata"]["normalized_time"] = _dt.datetime.now(_dt.timezone.utc).isoformat()
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text(json.dumps(canonical, ensure_ascii=False, indent=2), encoding="utf-8")
+    canonical["metadata"]["mapping"] = mapping or {}
+    for event in canonical.get("events", []):
+        if event.get("time_standard") == "none":
+            canonical["metadata"].setdefault("warnings", []).append(f"{event['event_id']}: time standard unknown; resolve before extracting waveforms")
+    Path(args.output).write_text(json.dumps(json_value(canonical), ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     n_events = len(canonical.get("events", []))
     n_stations = sum(len(e.get("stations", [])) for e in canonical.get("events", []))
     n_picks = sum(len(st.get("picks", [])) for e in canonical.get("events", []) for st in e.get("stations", []))
@@ -907,7 +941,7 @@ def load_station_csv(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
         return {}
     p = Path(path)
     if not p.exists():
-        return {}
+        raise ValueError(f"Station metadata file does not exist: {p}")
     with p.open("r", encoding="utf-8-sig", newline="") as fh:
         sample = fh.read(4096)
         fh.seek(0)
@@ -934,7 +968,9 @@ def load_station_csv(path: Optional[str]) -> Dict[str, Dict[str, Any]]:
     for row in rows:
         station = normalize_station_dict(row)
         out[station["station_id"]] = station
-        out[station_key(station["station_id"])] = station
+        out[make_station_id(station["station_network"], station["station_station"], station["station_location"])] = station
+        if station["station_location"] == DEFAULT_LOCATION:
+            out[f"{station['station_network']}.{station['station_station']}"] = station
     return out
 
 
@@ -958,6 +994,17 @@ def init_h5_file(h5: Any, args: argparse.Namespace, mode: str) -> Tuple[Any, Any
             "annotation_counts": [],
             "description": args.description,
             "file_size": "none",
+            "standard_revision": STANDARD_REVISION,
+            "user_defined": {
+                "profile": HDF5_FORMAT, "standard_status": "revision draft, not a published standard",
+                "encoding": "UTF-8", "case_sensitive": True, "max_string_bytes": MAX_STRING_BYTES,
+                "numeric_precision": "metadata float64/int64; quality_metric uint64; waveform dtype preserved",
+                "json_missing_numeric": "null maps to HDF5 NaN", "gap_policy": "split; no interpolation",
+                "overlap_policy": "retain all original records", "end_time_convention": "last observed sample",
+                "parameters": {k: v for k, v in vars(args).items() if k not in {"func", "license_text"}},
+                "units": {"angles": "degree", "station_elevation_m": "m", "station_depth_m": "m",
+                          "source_depth_km": "km", "sample_rate": "Hz", "waveform": args.unit},
+            },
         },
     )
     info = h5.require_group("information")
@@ -970,48 +1017,13 @@ def init_h5_file(h5: Any, args: argparse.Namespace, mode: str) -> Tuple[Any, Any
 def sample_attrs_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
     attrs = {field: event.get(field) for field in EVENT_FIELDS}
     attrs["type"] = "event"
+    attrs["user_defined"] = event.get("user_defined", {})
     return attrs
 
 
 def continuous_sample_attrs(sample_id: str, starttime: str, endtime: str) -> Dict[str, Any]:
-    return {
-        "type": "event",
-        "event_id": sample_id,
-        "source_type": "cont",
-        "source_origintime": starttime,
-        "source_origintime_err": math.nan,
-        "source_origintime_ref": math.nan,
-        "time_standard": "UTC",
-        "source_longitude_deg": math.nan,
-        "source_latitude_deg": math.nan,
-        "source_depth_km": math.nan,
-        "source_magnitude_type": ["none"],
-        "source_magnitude": [math.nan],
-        "source_magnitude_error": [],
-        "preferred_magnitude_type": "none",
-        "source_area": "none",
-        "source_agency": "none",
-        "location_method": "none",
-        "velocity_model_id": "none",
-        "num_phases_used": 0,
-        "num_stations_used": 0,
-        "max_azimuthal_gap_deg": math.nan,
-        "station_azimuth_uniformity": math.nan,
-        "min_epicentral_dist_km": math.nan,
-        "max_epicentral_dist_km": math.nan,
-        "horizontal_uncertainty_major_km": math.nan,
-        "horizontal_uncertainty_minor_km": math.nan,
-        "horizontal_uncertainty_azimuth": math.nan,
-        "vertical_uncertainty_km": math.nan,
-        "residual_mean_sec": math.nan,
-        "location_rms_sec": math.nan,
-        "event_status": "none",
-        "updated_time": "none",
-        "source_moment": [],
-        "source_fault_plane": [],
-        "source_fault_plane_err": [],
-        "event_remark": f"continuous window {starttime} to {endtime}",
-    }
+    return {"type": "event", "event_id": sample_id, "event_remark": "none",
+            "user_defined": {"window_start_time": starttime, "window_end_time": endtime, "time_standard": "UTC"}}
 
 
 def ensure_information_station(info_group: Any, station: Dict[str, Any], channel: Optional[str] = None) -> Any:
@@ -1020,19 +1032,29 @@ def ensure_information_station(info_group: Any, station: Dict[str, Any], channel
         channels = set(str(x) for x in station.get("station_channel_list", []))
         channels.add(str(channel))
         station["station_channel_list"] = sorted(channels)
-    group = info_group.require_group(station["station_id"])
+    group = info_group.require_group(association_key(station["station_id"]))
+    station["station_channel_list"] = sorted(set(list(group.attrs.get("station_channel_list", [])) + station.get("station_channel_list", [])))
     attrs = {field: station.get(field) for field in STATION_FIELDS}
     attrs["type"] = "station"
+    attrs["user_defined"] = station.get("user_defined", {})
     set_attrs(group, attrs)
     return group
 
 
 def ensure_sample_station(sample_group: Any, station: Dict[str, Any]) -> Any:
-    group = sample_group.require_group(station["station_id"])
+    group = sample_group.require_group(association_key(station["station_id"]))
     attrs = {field: station.get(field) for field in STATION_FIELDS}
+    attrs["station_channel_list"] = sorted(set(list(group.attrs.get("station_channel_list", [])) + station.get("station_channel_list", [])))
     attrs["type"] = "station"
+    attrs["user_defined"] = station.get("user_defined", {})
     set_attrs(group, attrs)
+    set_attrs(group.require_group("waveform"), {"type": "waveform"})
     return group
+
+
+def association_key(identifier: str) -> str:
+    text = str(identifier)
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, text)) if "/" in text or text in {"", ".", ".."} else text
 
 
 def next_segment_id(channel_group: Any) -> int:
@@ -1075,6 +1097,8 @@ def create_trace_dataset(
     source_file: str,
     compression: str,
     compression_opts: int,
+    quality_flag: str = "D",
+    quality_metric: int = 0,
 ) -> Any:
     waveform = station_group.require_group("waveform")
     set_attrs(waveform, {"type": "waveform"})
@@ -1098,19 +1122,10 @@ def create_trace_dataset(
             "sample_rate": float(sample_rate),
             "seg_start_time": start,
             "seg_end_time": end,
-            "quality_flag": "D",
-            "quality_metric": 0,
+            "quality_flag": quality_flag if quality_flag in {"D", "R", "Q", "M"} else "D",
+            "quality_metric": quality_metric,
             "quality_metric_description": "none",
-            "network": network,
-            "station": station,
-            "location": normalize_location(location),
-            "channel": channel,
-            "starttime": start,
-            "endtime": end,
-            "sampling_rate": float(sample_rate),
-            "npts": int(len(data)),
-            "dtype": str(getattr(data, "dtype", "")),
-            "source_file": source_file,
+            "user_defined": {"source_file": source_file},
         },
     )
     return ds
@@ -1134,6 +1149,8 @@ def write_label_group(station_group: Any, picks: Sequence[Dict[str, Any]]) -> No
                 values = [safe_json(v if v is not None else {}) for v in values]
             else:
                 values = [str(v if v not in (None, "") else "none") for v in values]
+            if any(len(value.encode("utf-8")) > MAX_STRING_BYTES for value in values):
+                raise ValueError(f"Label {field} exceeds {MAX_STRING_BYTES} UTF-8 bytes")
             ds = label.create_dataset(field, data=np.asarray(values, dtype=object), dtype=string_dtype)
         set_attrs(ds, {"type": "label", "field_name": field})
 
@@ -1191,6 +1208,32 @@ def interval_seconds_from_arg(value: str, custom: int) -> Optional[int]:
     raise SystemExit(f"Unsupported split interval: {value}")
 
 
+def split_missing_stream(stream: Any) -> Any:
+    np = import_required("numpy")
+    obspy = import_required("obspy")
+    out = obspy.Stream()
+    for trace in stream:
+        if not trace.stats.npts:
+            continue
+        trace = trace.copy()
+        values = np.ma.asarray(trace.data)
+        mask = np.ma.getmaskarray(values) | ~np.isfinite(values.data)
+        if mask.any():
+            trace.data = np.ma.array(values.data, mask=mask)
+            trace.stats.seismicx_quality_metric = int(getattr(trace.stats, "seismicx_quality_metric", 0)) | (1 << 4)
+            out += trace.split()
+        else:
+            trace.data = np.asarray(values.data)
+            out += trace
+    return out
+
+
+def trace_quality_attrs(trace: Any) -> Dict[str, Any]:
+    mseed = getattr(trace.stats, "mseed", {})
+    return {"quality_flag": mseed.get("dataquality", "D"),
+            "quality_metric": int(getattr(trace.stats, "seismicx_quality_metric", 0))}
+
+
 def cmd_make_hdf5_continuous(args: argparse.Namespace) -> None:
     obspy = import_required("obspy", "Install with: python -m pip install obspy")
     h5py = import_required("h5py", "Install with: python -m pip install h5py")
@@ -1210,15 +1253,15 @@ def cmd_make_hdf5_continuous(args: argparse.Namespace) -> None:
             try:
                 stream = obspy.read(str(file_path))
             except Exception as exc:
-                print(f"[WARN] Could not read {file_path}: {exc}")
-                continue
-            for trace in stream:
+                raise ValueError(f"Could not read waveform file {file_path}: {exc}") from exc
+            for trace in split_missing_stream(stream):
                 network = str(trace.stats.network or "")
                 station_code = str(trace.stats.station or "")
                 location = normalize_location(trace.stats.location)
                 channel = str(trace.stats.channel or "")
                 sid = make_station_id(network, station_code, location)
                 station_meta = dict(station_lookup.get(sid) or station_lookup.get(station_key(sid)) or normalize_station_dict({"station_id": sid}))
+                station_meta.update(station_id=sid, station_network=network or "none", station_station=station_code or "none", station_location=location)
                 station_meta["station_channel_list"] = sorted(set(listify(station_meta.get("station_channel_list")) + [channel]))
                 ensure_information_station(info, station_meta, channel)
                 station_ids.add(sid)
@@ -1227,6 +1270,10 @@ def cmd_make_hdf5_continuous(args: argparse.Namespace) -> None:
                     sample_group = data_group.require_group(sample_id)
                     if "type" not in sample_group.attrs:
                         set_attrs(sample_group, continuous_sample_attrs(sample_id, str(seg_start), str(seg_end)))
+                    window = json.loads(sample_group.attrs["user_defined"])
+                    window["window_start_time"] = min(window["window_start_time"], str(seg_start))
+                    window["window_end_time"] = max(window["window_end_time"], str(seg_end))
+                    set_attrs(sample_group, {"user_defined": window})
                     st_group = ensure_sample_station(sample_group, station_meta)
                     create_trace_dataset(
                         station_group=st_group,
@@ -1242,14 +1289,17 @@ def cmd_make_hdf5_continuous(args: argparse.Namespace) -> None:
                         source_file=str(file_path),
                         compression=args.compression,
                         compression_opts=args.compression_opts,
+                        **trace_quality_attrs(trace),
                     )
                     write_label_group(st_group, [])
             if file_index % 100 == 0 or file_index == len(files):
                 print(f"[INFO] processed {file_index}/{len(files)} waveform files")
         h5.attrs["num_stations"] = len(station_ids)
-        h5.attrs["num_events"] = len(data_group.keys())
-        h5.attrs["file_size"] = "pending"
-    write_sidecars(output, args.license_text)
+        h5.attrs["num_events"] = 0
+        finalize_channels(h5, args.trace_quality, args.max_quality_samples)
+        if args.catalog:
+            attach_continuous_labels(h5, normalize_catalog(Path(args.catalog), load_mapping(args.mapping)))
+    write_release_sidecars(output)
     print(f"[OK] Continuous HDF5 written to {output}")
 
 
@@ -1257,6 +1307,7 @@ def cmd_make_hdf5_event(args: argparse.Namespace) -> None:
     h5py = import_required("h5py", "Install with: python -m pip install h5py")
     np = import_required("numpy", "Install with: python -m pip install numpy")
     catalog = normalize_catalog(Path(args.catalog), load_mapping(args.mapping))
+    station_lookup = load_station_csv(args.station_csv)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     station_ids: set = set()
@@ -1264,16 +1315,31 @@ def cmd_make_hdf5_event(args: argparse.Namespace) -> None:
 
     with h5py.File(output, "w") as h5:
         info, data_group = init_h5_file(h5, args, "event")
+        provenance = json.loads(h5.attrs["user_defined"])
+        provenance["catalog_metadata"] = catalog.get("metadata", {})
+        set_attrs(h5, {"user_defined": provenance})
         for event in catalog.get("events", []):
             event_id = str(event.get("event_id") or stable_event_id(event.get("source_origintime"), event.get("source_latitude_deg"), event.get("source_longitude_deg"), "event"))
-            sample_group = data_group.require_group(event_id)
+            if any(existing.attrs.get("event_id") == event_id for existing in data_group.values()):
+                raise ValueError(f"Duplicate event_id: {event_id}; combine annotation sources in canonical JSON first")
+            sample_group = data_group.create_group(str(uuid.uuid5(uuid.NAMESPACE_URL, event_id)))
             set_attrs(sample_group, sample_attrs_from_event(event))
             stations = event.get("stations", [])
+            seen_stations = set()
             for raw_station in stations:
                 raw_picks = raw_station.get("picks", []) if isinstance(raw_station, dict) else []
                 station = normalize_station_dict(raw_station)
+                supplement = station_lookup.get(station["station_id"]) or station_lookup.get(
+                    make_station_id(station["station_network"], station["station_station"], station["station_location"]), {})
+                for key, value in supplement.items():
+                    current = station.get(key)
+                    if current is None or (isinstance(current, str) and current == "none") or (isinstance(current, float) and math.isnan(current)):
+                        station[key] = value
                 station["picks"] = [normalize_pick_dict(p) for p in raw_picks if isinstance(p, dict)]
                 sid = station["station_id"]
+                if sid in seen_stations:
+                    raise ValueError(f"Duplicate station {sid} in {event_id}; combine its pick lists before writing")
+                seen_stations.add(sid)
                 station_ids.add(sid)
                 ensure_information_station(info, station)
                 st_group = ensure_sample_station(sample_group, station)
@@ -1282,14 +1348,14 @@ def cmd_make_hdf5_event(args: argparse.Namespace) -> None:
                     phase_counter[str(pick.get("phase_name", "none"))] += 1
                 if args.mseed_index_db or args.waveform_input:
                     write_event_waveforms(sample_group, st_group, station, event, args, np)
-            sample_group.attrs["num_stations_used"] = len(stations)
-            sample_group.attrs["num_phases_used"] = sum(len(st.get("picks", [])) for st in stations)
+                    station["station_channel_list"] = sorted(st_group["waveform"].keys())
+                    set_attrs(st_group, {"station_channel_list": station["station_channel_list"]})
+                    ensure_information_station(info, station)
         h5.attrs["num_stations"] = len(station_ids)
         h5.attrs["num_events"] = len(catalog.get("events", []))
-        h5.attrs["annotation_types"] = list(phase_counter.keys())
-        h5.attrs["annotation_counts"] = [phase_counter[k] for k in phase_counter.keys()]
-        h5.attrs["file_size"] = "pending"
-    write_sidecars(output, args.license_text)
+        set_attrs(h5, {"annotation_types": list(phase_counter), "annotation_counts": list(phase_counter.values())})
+        finalize_channels(h5, args.trace_quality, args.max_quality_samples)
+    write_release_sidecars(output)
     print(f"[OK] Event HDF5 written to {output}")
 
 
@@ -1297,9 +1363,19 @@ def write_event_waveforms(sample_group: Any, station_group: Any, station: Dict[s
     origin = event.get("source_origintime")
     if not origin or origin == "none":
         return
+    if event.get("time_standard") != "UTC":
+        raise ValueError(f"{event['event_id']}: convert the declared time standard to UTC before extracting waveforms")
     start = obspy_utc(origin) - float(args.event_window_before)
     end = obspy_utc(origin) + float(args.event_window_after)
-    network, station_code, location = split_station_id(station["station_id"])
+    offset = parse_float(event.get("source_origintime_ref"))
+    if math.isfinite(offset):
+        start += offset
+        end += offset
+    network = station["station_network"]
+    station_code = station["station_station"]
+    location = station["station_location"]
+    if network == "none" or station_code == "none":
+        raise ValueError(f"{station['station_id']}: explicit network/station codes are needed for waveform lookup")
     channels = args.channels or "*"
     stream = None
     if args.mseed_index_db:
@@ -1311,8 +1387,8 @@ def write_event_waveforms(sample_group: Any, station_group: Any, station: Dict[s
         for file_path in resolve_files(args.waveform_input, suffixes=None if args.all_files else WAVEFORM_SUFFIXES, recursive=True):
             try:
                 candidate = obspy.read(str(file_path))
-            except Exception:
-                continue
+            except Exception as exc:
+                raise ValueError(f"Could not read waveform file {file_path}: {exc}") from exc
             for tr in candidate:
                 if network and str(tr.stats.network) != network:
                     continue
@@ -1325,11 +1401,12 @@ def write_event_waveforms(sample_group: Any, station_group: Any, station: Dict[s
                 if tr.stats.endtime < start or tr.stats.starttime > end:
                     continue
                 tr = tr.copy()
-                tr.trim(start, end, pad=False)
+                tr.trim(start, end, pad=False, nearest_sample=False)
+                tr.stats.seismicx_source_file = str(file_path)
                 stream += tr
     if not stream:
         return
-    for trace in stream:
+    for trace in split_missing_stream(stream):
         create_trace_dataset(
             station_group=station_group,
             data=np.asarray(trace.data),
@@ -1344,29 +1421,89 @@ def write_event_waveforms(sample_group: Any, station_group: Any, station: Dict[s
             source_file=str(getattr(trace.stats, "seismicx_source_file", getattr(trace.stats, "_format", "mseedindex"))),
             compression=args.compression,
             compression_opts=args.compression_opts,
+            **trace_quality_attrs(trace),
         )
 
 
-def write_sidecars(output_h5: Path, license_text: str) -> None:
-    out_dir = output_h5.parent
-    license_path = out_dir / "LICENSE"
-    if not license_path.exists():
-        license_path.write_text(license_text.rstrip() + "\n", encoding="utf-8")
-    checksum_path = out_dir / "md5sum.txt"
-    entries = []
-    for path in [output_h5, license_path]:
-        digest = hashlib.md5(path.read_bytes()).hexdigest()
-        entries.append(f"{digest}  {path.name}")
-    checksum_path.write_text("\n".join(entries) + "\n", encoding="utf-8")
+def attach_continuous_labels(h5: Any, catalog: Dict[str, Any]) -> None:
+    provenance = json.loads(h5.attrs["user_defined"])
+    provenance["catalog_metadata"] = catalog.get("metadata", {})
+    set_attrs(h5, {"user_defined": provenance})
+    by_station = defaultdict(list)
+    for event in catalog.get("events", []):
+        for station in event.get("stations", []):
+            for pick in station.get("picks", []):
+                pick = dict(pick)
+                pick["user_defined"] = dict(pick.get("user_defined") or {}, source_event_id=event["event_id"])
+                if pick.get("phase_arrival_time", "none") == "none":
+                    raise ValueError("Continuous labels need explicit UTC arrival times")
+                time = str(pick["phase_arrival_time"])
+                if not time.endswith("Z"):
+                    if event.get("time_standard") != "UTC":
+                        raise ValueError("Resolve label timezone before assigning continuous windows")
+                    time = clean_time_string(time + "Z")
+                    pick["phase_arrival_time"] = time
+                by_station[station["station_id"]].append((obspy_utc(time), pick))
+    counter = Counter()
+    for sample in h5["data"].values():
+        window = json.loads(sample.attrs["user_defined"])
+        for station in sample.values():
+            picks = [pick for time, pick in by_station[station.attrs["station_id"]]
+                     if obspy_utc(window["window_start_time"]) <= time <= obspy_utc(window["window_end_time"])]
+            write_label_group(station, picks)
+            counter.update(pick["phase_name"] for pick in picks)
+    set_attrs(h5, {"annotation_types": list(counter), "annotation_counts": list(counter.values())})
 
 
 def cmd_make_hdf5(args: argparse.Namespace) -> None:
+    output = Path(args.output).resolve()
+    if output.exists() and not args.overwrite:
+        raise SystemExit(f"Output exists: {output}; choose a new path or use --overwrite")
+    if args.hdf5_mode == "event" and (args.event_window_before < 0 or args.event_window_after <= 0):
+        raise SystemExit("Event window durations must be nonnegative, with after > 0")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    license_path = output.parent / "LICENSE"
+    supplied = Path(args.license_file).read_text(encoding="utf-8") if args.license_file else args.license_text
+    if supplied:
+        if license_path.exists() and license_path.read_text(encoding="utf-8").strip() != supplied.strip():
+            raise SystemExit("Release directory has a different LICENSE; choose a separate output directory")
+        license_path.write_text(supplied.rstrip() + "\n", encoding="utf-8")
+    if not license_path.exists() or not license_path.read_text(encoding="utf-8").strip():
+        raise SystemExit("Provide the data owner's --license-file, --license-text, or an existing output-directory LICENSE")
     if args.hdf5_mode == "event":
         cmd_make_hdf5_event(args)
     elif args.hdf5_mode == "continuous":
         cmd_make_hdf5_continuous(args)
     else:
         raise SystemExit(f"Unsupported mode: {args.hdf5_mode}")
+    report = validate_hdf5(output, release=True)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    if not report["valid"]:
+        raise SystemExit("Dataset validation failed; see errors above. Output is not a validated release.")
+
+
+def cmd_validate_hdf5(args: argparse.Namespace) -> None:
+    files = iter_hdf5_files(args.h5)
+    if not files:
+        raise SystemExit("No HDF5 files matched")
+    reports = [validate_hdf5(path, release=args.release) for path in files]
+    print(json.dumps(reports, ensure_ascii=False, indent=2))
+    if any(not report["valid"] for report in reports):
+        raise SystemExit(1)
+
+
+def cmd_package_dataset(args: argparse.Namespace) -> None:
+    files = iter_hdf5_files(args.h5)
+    if not files:
+        raise SystemExit("No HDF5 files matched")
+    for path in files:
+        write_release_sidecars(path)
+    for directory in {path.parent for path in files}:
+        write_checksums(directory)
+    reports = [validate_hdf5(path, release=True) for path in files]
+    print(json.dumps(reports, ensure_ascii=False, indent=2))
+    if any(not report["valid"] for report in reports):
+        raise SystemExit(1)
 
 
 def iter_hdf5_files(value: str) -> List[Path]:
@@ -1375,22 +1512,24 @@ def iter_hdf5_files(value: str) -> List[Path]:
         return [p]
     if p.is_dir():
         return sorted(list(p.glob("*.h5")) + list(p.glob("*.hdf5")))
-    return sorted(Path(x) for x in Path(".").glob(value))
+    return sorted(Path(x).resolve() for x in glob.glob(value))
 
 
 def iter_standard_waveform_datasets(h5_file: Path) -> Iterator[Dict[str, Any]]:
     h5py = import_required("h5py", "Install with: python -m pip install h5py")
     with h5py.File(h5_file, "r") as h5:
-        def visitor(name: str, obj: Any) -> None:
-            return None
-
         datasets: List[Tuple[str, Any]] = []
-        h5.visititems(lambda name, obj: datasets.append((name, obj)) if hasattr(obj, "shape") and obj.attrs.get("type") == "trace" else None)
+        h5.visititems(lambda name, obj: datasets.append((name, obj)) if isinstance(obj, h5py.Dataset)
+                     and obj.attrs.get("type") == "trace" and "trace_quality" not in obj.attrs else None)
         for name, ds in datasets:
             parts = name.split("/")
-            sample_id = parts[1] if len(parts) > 1 and parts[0] == "data" else ""
-            station_id = parts[2] if len(parts) > 2 and parts[0] == "data" else ""
-            network, station, location = split_station_id(station_id)
+            station_group = ds.parent.parent.parent
+            sample_group = station_group.parent
+            sample_id = str(sample_group.attrs.get("event_id", sample_group.name.rsplit("/", 1)[-1]))
+            station_id = str(station_group.attrs.get("station_id", station_group.name.rsplit("/", 1)[-1]))
+            network = str(station_group.attrs.get("station_network", "none"))
+            station = str(station_group.attrs.get("station_station", "none"))
+            location = normalize_location(station_group.attrs.get("station_location"))
             start = str(ds.attrs.get("seg_start_time", ds.attrs.get("starttime", "")))
             end = str(ds.attrs.get("seg_end_time", ds.attrs.get("endtime", "")))
             try:
@@ -1400,7 +1539,7 @@ def iter_standard_waveform_datasets(h5_file: Path) -> Iterator[Dict[str, Any]]:
                 start_epoch = math.nan
                 end_epoch = math.nan
             yield {
-                "h5_file": str(h5_file),
+                "h5_file": str(h5_file.resolve()),
                 "dataset_path": "/" + name,
                 "sample_id": sample_id,
                 "station_id": station_id,
@@ -1415,7 +1554,7 @@ def iter_standard_waveform_datasets(h5_file: Path) -> Iterator[Dict[str, Any]]:
                 "sample_rate": parse_float(ds.attrs.get("sample_rate", ds.attrs.get("sampling_rate"))),
                 "npts": parse_int(ds.attrs.get("npts"), int(ds.shape[0]) if ds.shape else 0),
                 "dtype": str(ds.dtype),
-                "source_file": str(ds.attrs.get("source_file", "")),
+                "source_file": str(json.loads(ds.attrs.get("user_defined", "{}" )).get("source_file", ds.attrs.get("source_file", ""))),
             }
 
 
@@ -1453,8 +1592,13 @@ def cmd_build_hdf5_index(args: argparse.Namespace) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_waveform_nslc_time ON waveform_segments(network, station, location, channel, start_epoch, end_epoch)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_waveform_sample ON waveform_segments(sample_id)")
     total = 0
-    for h5_file in iter_hdf5_files(args.h5):
+    h5_files = iter_hdf5_files(args.h5)
+    if not h5_files:
+        conn.close()
+        raise SystemExit("No HDF5 files matched")
+    for h5_file in h5_files:
         rows = list(iter_standard_waveform_datasets(h5_file))
+        cur.execute("DELETE FROM waveform_segments WHERE h5_file = ?", (str(h5_file.resolve()),))
         cur.executemany(
             """
             INSERT OR IGNORE INTO waveform_segments (
@@ -1508,7 +1652,9 @@ class SeismicXHDF5Dataset:
         if index_db:
             conn = sqlite3.connect(index_db)
             conn.row_factory = sqlite3.Row
-            self.items = [dict(r) for r in conn.execute("SELECT * FROM waveform_segments ORDER BY id").fetchall()]
+            selected = {str(p.resolve()) for p in iter_hdf5_files(h5)}
+            self.items = [dict(r) for r in conn.execute("SELECT * FROM waveform_segments ORDER BY id").fetchall()
+                          if str(Path(r["h5_file"]).resolve()) in selected]
             conn.close()
         else:
             self.items = []
@@ -1527,18 +1673,17 @@ class SeismicXHDF5Dataset:
             attrs = {k: ds.attrs[k] for k in ds.attrs.keys()}
             item["waveform"] = waveform
             item["attrs"] = attrs
-            parts = item["dataset_path"].strip("/").split("/")
-            if len(parts) >= 3 and parts[0] == "data":
-                label_path = "/" + "/".join(parts[:3] + ["label"])
-                if label_path in h5:
-                    label_group = h5[label_path]
-                    labels = {}
-                    for key in label_group.keys():
-                        values = label_group[key][()]
-                        if hasattr(values, "tolist"):
-                            values = values.tolist()
-                        labels[key] = [v.decode("utf-8") if isinstance(v, bytes) else v for v in values]
-                    item["labels"] = labels
+            station_group = ds.parent.parent.parent
+            item["station_attrs"] = dict(station_group.attrs)
+            item["sample_attrs"] = dict(station_group.parent.attrs)
+            if "label" in station_group:
+                item["labels"] = {key: value.asstr()[()].tolist() if h5py.check_string_dtype(value.dtype)
+                                  else value[()].tolist() for key, value in station_group["label"].items()}
+            if "trace_quality" in ds.parent:
+                quality = ds.parent["trace_quality"]
+                item["trace_quality"] = quality[()]
+                item["trace_quality_attrs"] = dict(quality.attrs)
+                item["trace_quality_offset"] = round(float(obspy_utc(ds.attrs["seg_start_time"]) - obspy_utc(quality.attrs["start_time"])) * float(quality.attrs["sample_rate"]))
         return item
 
 
@@ -1549,7 +1694,7 @@ def cmd_example_dataloader(args: argparse.Namespace) -> None:
         torch = import_required("torch", "Install with: python -m pip install torch")
         loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, collate_fn=lambda x: x)
         iterator = iter(loader)
-        for i in range(min(args.n_samples, len(dataset))):
+        for i in range(min(args.n_samples, len(loader))):
             batch = next(iterator)
             item = batch[0]
             print_sample(i, item)
@@ -1575,10 +1720,14 @@ def add_common_hdf5_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agency", default="none")
     parser.add_argument("--author", default="none")
     parser.add_argument("--description", default="Standardized SeismicX HDF5 dataset")
-    parser.add_argument("--unit", default="counts")
+    parser.add_argument("--unit", default="none", help="Verified physical unit, for example counts or m/s; unknown remains none")
     parser.add_argument("--compression", choices=["gzip", "lzf", "none"], default="gzip")
     parser.add_argument("--compression-opts", type=int, default=4)
-    parser.add_argument("--license-text", default="Dataset license should be provided by the data owner.")
+    parser.add_argument("--license-text", default=None)
+    parser.add_argument("--license-file", default=None)
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--trace-quality", action="store_true", help="Write one unsegmented A.4 quality timeline per channel")
+    parser.add_argument("--max-quality-samples", type=int, default=10000000)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1642,6 +1791,7 @@ def build_parser() -> argparse.ArgumentParser:
     event = mode_sub.add_parser("event")
     add_common_hdf5_args(event)
     event.add_argument("--catalog", required=True)
+    event.add_argument("--station-csv", default=None)
     event.add_argument("--mapping", default=None)
     event.add_argument("--mseed-index-db", default=None)
     event.add_argument("--waveform-input", default=None)
@@ -1655,10 +1805,21 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_hdf5_args(cont)
     cont.add_argument("--waveform-input", required=True)
     cont.add_argument("--station-csv", default=None)
+    cont.add_argument("--catalog", default=None, help="Optional labels, assigned to continuous windows without cutting by picks")
+    cont.add_argument("--mapping", default=None)
     cont.add_argument("--all-files", action="store_true")
     cont.add_argument("--split-interval", choices=["single", "hour", "day", "custom"], default="hour")
     cont.add_argument("--custom-interval-seconds", type=int, default=3600)
     cont.set_defaults(func=cmd_make_hdf5)
+
+    p = sub.add_parser("validate-hdf5")
+    p.add_argument("--h5", required=True)
+    p.add_argument("--release", action="store_true", help="Also verify JSON, LICENSE and every release checksum")
+    p.set_defaults(func=cmd_validate_hdf5)
+
+    p = sub.add_parser("package-dataset")
+    p.add_argument("--h5", required=True, help="Finalize sidecars after adding indexes, StationXML or run notes")
+    p.set_defaults(func=cmd_package_dataset)
 
     p = sub.add_parser("build-hdf5-index")
     p.add_argument("--h5", required=True)

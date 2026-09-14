@@ -21,10 +21,15 @@ ObsPy reads many seismic formats. Convert first:
 python scripts/seismicx_dataset.py convert-waveforms \
   --input raw_waveforms \
   --output-dir mseed \
-  --recursive
+  --recursive --strict
 ```
 
 Use `--obspy-format FORMAT` only when ObsPy cannot infer the format.
+The supplied 2026-08-31 draft forbids interpolation or zero filling of missing
+waveforms. Masked/nonfinite samples are split into uninterrupted segments;
+overlapping records are retained. --merge and non-none --fill-value are rejected
+by this profile. Keep original archives and document any separate scientific
+preprocessing; format conversion alone does not establish physical units.
 
 ## Build a miniSEED SQLite index
 
@@ -68,3 +73,5 @@ then reads matching files with ObsPy and trims the returned stream.
 4. Build event or continuous HDF5.
 5. Build the HDF5 dataset index.
 6. Validate with the dataloader example.
+7. Add run notes and optional StationXML to a dedicated release directory,
+   then run package-dataset and validate-hdf5 --release to cover all files.

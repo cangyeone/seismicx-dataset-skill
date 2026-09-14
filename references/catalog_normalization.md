@@ -43,8 +43,8 @@ Normalize all earthquake catalogs and annotation files to
               "phase_name_snr": null,
               "polarity_type": "U",
               "polarity_clarity": "none",
-              "phase_annotation_method": "manual_unknown",
-              "polarity_annotation_method": "manual_unknown",
+              "phase_annotation_method": "manual_example_agency",
+              "polarity_annotation_method": "none",
               "user_defined": {}
             }
           ]
@@ -69,8 +69,20 @@ When a catalog format is not already canonical:
    names from `standard_hdf5_schema.md`.
 3. Create a mapping JSON when the built-in aliases are not enough.
 4. Preserve unmodeled fields under `user_defined` so information is not lost.
-5. Normalize times to ISO 8601 UTC strings where possible. If timezone is
-   unknown, keep the original string and record a warning.
+5. Convert known timezone offsets to ISO 8601 UTC strings. If timezone is
+   unknown, retain the original string, set time_standard to none, and record
+   a warning. Do not extract event windows until it is resolved. GPS/TAI need
+   an explicit conversion, not a change of suffix. Relative arrivals need a
+   documented reference before conversion to absolute pick times.
+6. Retain unmapped event, station and pick fields in user_defined, including
+   original annotation methods. Do not infer a manual/automatic method when
+   evidence is missing. Keep repeated sources and reviews as separate picks.
+7. Align magnitude types, values and error lists; never guess a pairing.
+   Missing station depth or location-use counts are NaN, not zero. Counts of
+   phases/stations used for location must not be replaced by dataset totals.
+8. Write strict JSON: numeric missing values are null, never NaN or Infinity.
+   The writer converts these to float64 NaN. Canonical input JSON is separate
+   from the hierarchical release JSON exported from completed HDF5.
 
 ## Mapping JSON
 
@@ -102,6 +114,11 @@ When a catalog format is not already canonical:
 ```
 
 Values may be a string column name or a list of candidate column names.
+Mappings align fields only. Unit conversions and unfamiliar block grammars
+require an inspected source-specific adapter. The CLI is not an LLM and does
+not infer arbitrary formats by itself; the hosting agent performs that work.
+Record adapter/mapping, original units, conversion formulas and assumptions
+in canonical metadata and release run notes.
 
 ## Common aliases
 
